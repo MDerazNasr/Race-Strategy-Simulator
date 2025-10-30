@@ -59,7 +59,6 @@ def tire_wear(tire_type):
     else:  # HARD
         return 0.5
 
-
 car1 = env.process(car(env, 1, 9, 0, 90))
 car2 = env.process(car(env, 2, 9, 0, 90))
 car3 = env.process(car(env, 3, 9, 0, 90))
