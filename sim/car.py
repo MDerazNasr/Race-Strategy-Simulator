@@ -1,16 +1,48 @@
+import random
+
 class Car:
-    #tire_compound = {SOFT: ..., MEDIUM: ..., HARD: ...}
+
+    #Class level constants
+    FUEL_EFFECT = 0.02
+    WEAR_EFFECT = 0.05
+    #Tire compound data
+    TIRE_DATA = {
+        'SOFT': { 'modifier': -2, 'wear_rate': 2 },
+        'MEDIUM': { 'modifier': -1, 'wear_rate': 1 },
+        'HARD': { 'modifier': 0, 'wear_rate': 0.5 }
+    }
     
-    def __init__(self, carid, base_lap_time, tire_compound, tire_age, fuel_load, fuel_starting_load, lap_times, total_time, pitstops):
+    def __init__(self, carid, base_lap_time, tire_compound='MEDIUM', fuel_starting_load=100):
+        #Basic attributes
         self.carid = carid
         self.base_lap_time = base_lap_time
         self.tire_compound = tire_compound
-        self.tire_age = tire_age
-        self.fuel_load = fuel_load
         self.fuel_starting_load = fuel_starting_load
-        self.lap_times = lap_times
-        self.total_time = total_time
-        self.pitstops = pitstops
+        
+        #Current state variables
+        self.tire_age = 0
+        self.fuel_load = fuel_starting_load
+        
+        #statistics
+        self.lap_times = []
+        self.total_time = 0
+        self.pitstops = 0
+
+        #physics parameters
+        self.rho = 1.225 #density of air
+        self.Cd = 0.3 #drag coefficient (0.7?)
+        self.A = 2 #frontal area (1.5)
+        self.g = 9.81 #acceleration due to gravity
+        self.m = 1000 #mass of the car
+        self.I = 1000 #moment of inertia
+        self.r = 0.3 #radius of the tire
+        self.f = 0.01 #rolling resistance coefficient
+        self.Crr = 0.01 #rolling resistance coefficient
+        self.P = 12000 #power of the engine (kW)
+        self.mu = 1.5 #coefficient of friction
+        self.Cl = 3.5 #downforce coefficient
+
+
 
     def get_carid(self):
         return self.carid
