@@ -29,15 +29,15 @@ class Car:
         self.pitstops = 0
         self.total_laps = 0
         self.total_pitstops = 0
-        self.total_fuel_used = 0
-        self.total_wear = 0
-        self.total_temp_adjustment = 0
-        self.total_random_adjustment = 0
-        self.total_lap_adjustment = 0
-        self.total_wear_rate = 0
-        self.total_fuel_effect = 0
-        self.total_wear_effect = 0
-        self.total_temp_adjustment = 0  
+        # self.total_fuel_used = 0
+        # self.total_wear = 0
+        # self.total_temp_adjustment = 0
+        # self.total_random_adjustment = 0
+        # self.total_lap_adjustment = 0
+        # self.total_wear_rate = 0
+        # self.total_fuel_effect = 0
+        # self.total_wear_effect = 0
+        # self.total_temp_adjustment = 0  
 
         #physics parameters
         self.rho = 1.225 #density of air
