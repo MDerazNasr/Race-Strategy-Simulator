@@ -24,7 +24,7 @@ class F1Env(gym.Env):
         self.track = generate_oval_track() #you generate a simple circular-ish track (list of (x,y) points)
 
         #Car
-        self.car = Car()
+        self.car = Car() #create a car using the model you wrote earlier
 
         #Action: [throttle, steer_norm]
         self.action_space = spaces.Box(
@@ -33,7 +33,19 @@ class F1Env(gym.Env):
         )
 
         #Observations: [x,y, cos(yaw), sin(yaw), v ]
-        obs_high = np.array(
+        '''
+        observation space, what the agent sees
+        every observation here is a 7D vector:
+            1.	x → car position X
+            2.	y → car position Y
+            3.	cos(yaw)
+            4.	sin(yaw)
+            5.	v → speed
+            6.	dist → distance from the track centerline
+            7.	progress → how far around the track you are (0 to ~1)
+        
+        '''
+        obs_high = np.array( #max magnitude guess
             [1000, 1000, 1, 1, 100, 100, 1],
             dtype=np.float32
         )
@@ -42,8 +54,30 @@ class F1Env(gym.Env):
             high = obs_high,
             dtype = np.float32
         )
-        self.max_steps = 2000
+        self.max_steps = 2000 #stop episode after 2000 timestamps to avoid infinite ep
         self.step_count = 0
+
+    def get_obs(self):
+        x, y, yaw, v = self.car.x, self.car.y, self.car.yaw, self.car.v
+        idx, dist = closest_point(self.track, x, y)
+        progress = progress_along_track(self.track, idx)
+        obs = np.array(
+            [
+                x,
+                y,
+                np.cos(yaw),
+                np.sin(yaw),
+                v,
+                dist,
+                progress,
+            ],
+            dtype=np.float32,
+        )
+        return obs
+    
+    def get_info(self):
+        return {}
+    
         
 '''
 Gym gives a standard interface:
