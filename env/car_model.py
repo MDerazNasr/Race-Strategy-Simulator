@@ -78,8 +78,8 @@ class Car:
 	    v cannot go negative (no reverse)
         '''
         dv = accel - self.drag_coeff * self.v
-        self.v += dv * dt
-        self.v = max(self.v, 0.0)
+        self.v += dv * dt #dt is timestamp, d (delta/change)
+        self.v = max(self.v, 0.0) #if the braking + drag tries to make v -> 0 we just stop
 
         #4 kinematic bicycle model
         '''
@@ -99,6 +99,7 @@ class Car:
         else:
             yaw_rate = 0.0
         
+        # yaw_new = yaw_old + (how fast we turn) * (how long we’re turning)
         self.yaw += yaw_rate * dt
 
         #5 - update position
@@ -112,12 +113,79 @@ class Car:
         return np.array([self.x, self.y, self.yaw, self.v], dtype=np.float32) #[ x, y, yaw_angle, speed ]
 
         '''
-        3- what is dt, drag, dv
-        self.v = max(self.v, 0.0)
+        PURPOSE OF DT: 
+        every time you call step(), you simulate 0.1 seconds of the car’s motion.
 
-        4- 
-        what is - 
+        If you call it 10 times → that’s 1 second of driving.
 
-        5 - self.x += self.v * np.cos(self.yaw) * dt
-self.y += self.v * np.sin(self.yaw) * dt
+        If you call it 100 times → that’s 1 lap worth of micro-updates.
+
+        Think of it like a game loop:
+        The smaller the dt → the smoother the simulation.
+
+        In Formula 1 simulators, dt is often 1ms to 10ms.
+        For early versions of your project, 0.1s is fine.
+
+        drag — air resistance
+        real drag is - drag ∝ v²
+        for simplicity we are using
+        drag ∝ v (This prevents the car from accelerating forever.)
+
+
+        dv = accel - drag
+        means:
+        •	Engine gives positive acceleration
+        •	Aerodynamics subtracts some
+        •	Net result = dv
+
+        Yaw = direction the car is facing
+        Yaw angle is measured in radians.
+            •	yaw = 0 → pointing right
+            •	yaw = π/2 → pointing up
+            •	yaw = -π/2 → pointing down
+
+        Yaw rate = how fast the car’s direction changes
+        	•	tan(steering) → bigger steering angle → sharper turning
+
+            
+        beta - Slip angle = the difference between where the tires point vs where the car moves.
+        Real racing physics:
+            •	On a corner, the car does not move in the exact direction a wheel is pointing.
+            •	Tyres deform → you get a slip angle.
+            •	Slip angle gives you understeer/oversteer dynamics.
+
+        For now, you ignore this → simple model.
+
+        Beta will be used later when you add tyre physics.
+
+        what is --> if abs(steering) > 1e-4:
+            Because tan(0) = 0
+        But tan(very small number) ≈ small number.
+
+        However, floating point numbers are messy.
+        Steering can be super close to zero but not exactly zero.
+
+        Example: steering = 0.000000000145
+        If you compute tan(steering) you get some tiny noise.
+
+        This line:
+            •	Prevents unnecessary math
+            •	Avoids division weirdness
+            •	Says: “if steering is basically zero, don’t bother turning”
+
+        So yaw_rate becomes 0.
+
+
+        Search up why cos computes x direction and sin computes y direction
+        
+        If you move forward with speed v and direction θ:
+            •	The horizontal movement = v * cos(θ)
+            •	The vertical movement = v * sin(θ)
+
+        cos = adjacent / hypotenuse
+        sin = opposite / hypotenuse
+        ex:
+        cos(0) = 1
+        sin(0) = 0
+        => car moves purely to the right
         '''
