@@ -80,3 +80,44 @@ class Car:
         dv = accel - self.drag_coeff * self.v
         self.v += dv * dt
         self.v = max(self.v, 0.0)
+
+        #4 kinematic bicycle model
+        '''
+            If you steer, the front “wheel” points left/right.
+            This creates a turning yaw rate.
+            Faster speed → more turning
+            Bigger steering angle → more turning
+            Bigger wheelbase → less turning
+
+            So:
+            small cars turn sharply
+            F1 cars (long wheelbase) turn less sharply        
+        '''
+        if abs(steering) > 1e-4:
+            beta = 0.0
+            yaw_rate = self.v / self.wheelbase * np.tan(steering)
+        else:
+            yaw_rate = 0.0
+        
+        self.yaw += yaw_rate * dt
+
+        #5 - update position
+        '''
+        cos = how much movement along x direction
+	    sin = how much along y direction
+        '''
+        self.x += self.v * np.cos(self.yaw) * dt
+        self.y += self.v * np.sin(self.yaw) * dt
+
+        return np.array([self.x, self.y, self.yaw, self.v], dtype=np.float32) #[ x, y, yaw_angle, speed ]
+
+        '''
+        3- what is dt, drag, dv
+        self.v = max(self.v, 0.0)
+
+        4- 
+        what is - 
+
+        5 - self.x += self.v * np.cos(self.yaw) * dt
+self.y += self.v * np.sin(self.yaw) * dt
+        '''
