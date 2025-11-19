@@ -30,3 +30,41 @@ def progress_along_track(track, idx):
     '''
     return idx/ len(track)
 
+'''
+This gives a progress ratio between 0 and 1.
+
+Example:
+	•	idx = 0 → start line → 0%
+	•	idx = 50 → quarter lap → 0.25
+	•	idx = 199 → almost full lap → 0.995
+
+This is VERY crude but works for a circle.
+
+Later we will improve this using:
+	•	cumulative arc length
+	•	spline-based track distance
+	•	segment-based progress
+	•	projection onto track centerline
+
+Let’s Answer the “Why?” Intuitively
+
+Why generate the track as points?
+
+Because simulation happens in discrete time, so tracks are easier to handle as discrete points too.
+
+Why find closest point?
+
+Because you need a reference on the track to:
+	•	compute car progress
+	•	detect off-track
+	•	compute reward
+	•	orient the car relative to the track
+	•	make racing lines
+Why is progress = idx / len(track)?
+
+It’s the simplest approximation of “how far around the lap” you are.
+
+Better systems will measure real distance along the centerline.
+
+But for now, this works.
+'''
