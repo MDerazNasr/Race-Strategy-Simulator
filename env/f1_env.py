@@ -103,7 +103,64 @@ class F1Env(gym.Env):
         info = self.get_info()
         return obs, info #return initial observation, and info (implemented later)
     
+    #advance simulation one tick
+    def step(self, action): 
+        self.step_count += 1 
+
+        throttle, steer = action
+        state = self.car.step(throttle, steer, dt=self.dt) #call step() with curr throttle, steer
+        obs = self.get_obs() #recompute the observation
+
+        #reward: move forward along track, penalise distance from center & low speed
+        x, y, yaw, v = state #state is [x, y, yaw, v] returned from the car.
+        '''
+        Currently:
+            Faster car → higher reward (v * 0.1)
+            Farther from track centerline → penalty (- dist * 0.05)
+
+        So the agent is encouraged to:
+            go fast
+            stay near the track
+        '''
+        idx, dist = closest_point(self.track, x, y)
+        progress = progress_along_track(self.track, idx)
+
+        reward = v * 0.1 - dist * 0.05 #simple placeholder
+
+        '''
+        2 ways an episode could end
+        1.terminated → “natural/real” ending
+            Here: if the car is more than 20 units away from the track, we treat it as going off track.
+            You also give a -10 penalty as a “you screwed up” signal.
+        2.truncated → “artificial/time limit” ending
+            If the episode just lasts too long (step_count >= max_steps)
+            This is not “bad”, just a cut-off.
+        '''
+        terminated = False
+        truncated = False
+
+        #End episode if too far form tack or we exceed steps
+        if dist > 20.0:
+            terminated = True
+            reward -= 10.0 #penalty for going off-track
         
+        if self.step_count >= self.max_steps:
+            truncated = True
+        '''
+            obs → what next state looks like
+            reward → how good that action was
+            terminated → did we end for real (off track)?
+            truncated → did we time out?
+            info → extra, not used for learning, but good for logging
+        '''
+        info = {"progress": progress, "dist": dist}
+        return obs, reward, terminated, truncated, info
+
+    #skip full rendering for now
+    def render(self):
+        pass
+    def clone(self):
+        pass
 '''
 Gym gives a standard interface:
 	•	reset() → start a new episode → returns initial observation
