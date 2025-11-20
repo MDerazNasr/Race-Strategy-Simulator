@@ -31,13 +31,13 @@ class Car:
         self.drag_coeff = drag_coeff #aerodynamic drag
 
     #resets car back to its initial state
-    def rest(self, x=0.0, y=0.0, yaw=0.0, v=0.0):
+    def reset(self, x=0.0, y=0.0, yaw=0.0, v=0.0):
         self.x = x
         self.y = y
         self.yaw = yaw
         self.v = v
     #Where is the car after applying throttle + steer for dt seconds?
-    def step(self, throttle, steering, dt=0.1):
+    def step(self, throttle, steer_norm, dt=0.1):
         #implement physics
         #this will becomne RL environment
         '''
