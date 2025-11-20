@@ -24,9 +24,8 @@ def run_random_steps(steps=200):
         4.	Computes distance from track.
         5.	Computes progress.
         6.	Computes reward: 
-        
         '''
-        total_reward += reward
+        total_reward += reward #reward system will be amended later on
 
         if terminated or truncated:
             print(f"Episode ended at step {t}, total reward={total_reward: .2f}")
