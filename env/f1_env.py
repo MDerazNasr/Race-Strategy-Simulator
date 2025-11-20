@@ -58,9 +58,13 @@ class F1Env(gym.Env):
         self.step_count = 0
 
     def get_obs(self):
+        #pull the car state
         x, y, yaw, v = self.car.x, self.car.y, self.car.yaw, self.car.v
+        #find the closest track point and the distance to it (track.py)
         idx, dist = closest_point(self.track, x, y)
+        #covert index into [0,1] progress
         progress = progress_along_track(self.track, idx)
+        #build observation vector
         obs = np.array(
             [
                 x,
@@ -74,9 +78,30 @@ class F1Env(gym.Env):
             dtype=np.float32,
         )
         return obs
+    '''
+    Why cos(yaw) and sin(yaw) instead of yaw directly?
+
+        because angles wrap around
+        yaw = π and yaw = -π are basically the same direction,
+        but a neural net might treat them as very different numbers.
+
+        Using (cos, sin) gives a smooth, continuous representation.
+    '''
     
     def get_info(self):
         return {}
+    #starting new episode
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        self.step_count = 0 #reset counter to 0
+
+        #start near first track point, facing tangentially
+        start = self.track[0]
+        self.car.reset(x=start[0], y=start[1], yaw=0.0, v=0.0)  #yaw=0 → currently you’re just pointing in +x direction.
+
+        obs = self.get_obs()
+        info = self.get_info()
+        return obs, info #return initial observation, and info (implemented later)
     
         
 '''
@@ -86,7 +111,7 @@ Gym gives a standard interface:
 	•	obs (what agent sees next)
 	•	reward (how good that step was)
 	•	terminated (did we reach a “real” end? crash, finish lap, etc.)
-	•	truncated (did we stop because of a time limit, not a real ending?)
+•	truncated (did we stop because of a time limit, not a real ending?)
 	•	info (extra debug info)
 
 Your F1Env is wrapping:
