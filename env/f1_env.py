@@ -8,16 +8,22 @@ In RL world, everything is:
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
+import sys
+from pathlib import Path
 
-from .car_model import Car
-from .track import generate_oval_track, closest_point, progress_along_track
+current_file = Path(__file__).resolve()
+project_root = current_file.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+from env.car_model import Car
+from env.track import generate_oval_track, closest_point, progress_along_track
 
 class F1Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30} #info used for rendering
 
     def __init__(self, render_mode=None, dt= 0.1):
         super().__init__()
-        super.dt = dt #dt = how much simulated time passes each step(). Same as in Car
+        self.dt = dt #dt = how much simulated time passes each step(). Same as in Car
         self.render_mode = render_mode #render_mode = you'll use this later if you draw stuff
 
         #Track
