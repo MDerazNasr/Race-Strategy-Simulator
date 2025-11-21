@@ -33,6 +33,7 @@ def run_random_steps(steps=200):
     
     env.close()
     print(f"Final total rewards:", total_reward)
+    #test subject
 
 if __name__ == "__main__":
     run_random_steps()
