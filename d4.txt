@@ -1,0 +1,29 @@
+Day 4 - Behaviour CLoning(BC)
+
+Teaching a neural net to imitate your expert driver
+
+1. collect a dataset (state, action) pairs from the expert
+
+2. Save it to a disk
+
+3. Build a PyTorch MLP policy and train it with supervised learning
+
+4. Make sure you understand every line, shapes, math and why
+
+What is Behviour Cloning?
+
+- you have an expert driver - a hand-coded controller:
+    ExpertDriver.get_action(car)
+
+- For each time step:
+    - The environment gives you a state (what the car "sees")
+    - The expert gives you an action (throttle, steering)
+- Behaviour cloning trains a neural network π_θ(state) ≈ action_expert
+
+- This is just supervised learning:
+    - input: state vector (numbers)
+    - Targets: action vector (throttle, steer)
+    - Loss: Mean Squared Error between predicted and expert actions
+
+Later, RL agens will start from this policy (so it doesnt learn from scratch)
+

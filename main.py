@@ -11,7 +11,7 @@ def run_random_steps(steps=200):
     for t in range(steps):
         action = env.action_space.sample()
         '''
-        returns something like: (always in valid range)
+        returns something like: (always in valid range) 
         [ 0.92, -0.31 ]  → random throttle, random steering
         [ -0.8, 0.11 ]
         [ 1.0, -1.0 ]
