@@ -12,8 +12,6 @@ if str(project_root) not in sys.path:
 
 from env.track import closest_point
 
-
-
 class ExpertDriver:
     def __init__(self, track, lookahead=8, max_speed=20.0, corner_factor=12.0):
         self.track = track
