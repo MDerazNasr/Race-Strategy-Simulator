@@ -10,6 +10,7 @@ from gymnasium import spaces
 import numpy as np
 import sys
 from pathlib import Path
+import matplotlib.pyplot as plt
 
 current_file = Path(__file__).resolve()
 project_root = current_file.parent.parent
@@ -164,7 +165,17 @@ class F1Env(gym.Env):
 
     #skip full rendering for now
     def render(self):
-        pass
+        if not hasattr(self, 'fig'):
+            plt.ion()
+            self.fig, self.ax = plt.subplots(figsize=(6,6))
+            self.ax.plot(self.track[:,0], self.track[:,1], '--', alpha=0.5)
+
+            (self.car_point,) = self.ax.plot([], [], 'ro')
+            self.ax.set_aspect('equal')
+        self.car_point.set_data(self.car.x, self.car.y)
+        self.fig.canvas.draw()
+        self.fig.canvas.flush_events()
+
     def clone(self):
         pass
 '''
