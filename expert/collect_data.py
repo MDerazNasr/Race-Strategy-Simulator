@@ -29,8 +29,7 @@ def run_expert_lap():
 
         if terminated:
             print("Expert went off track")
-            break
-            
+            break 
     plt.plot(xs, ys, label="Expert path")
     plt.plot(env.track[:,0], env.track[:,1], '--', alpha=0.5, label="Track")
     plt.axis('equal')
