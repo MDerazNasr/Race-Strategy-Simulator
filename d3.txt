@@ -1,0 +1,19 @@
+Day 3
+- add a rule based expert driver (to train imitation learning later)
+- add simple rendering so you can see the car driving
+- Understand all the physics, math, and design choices in detail
+
+goal - Build a deterministic, hand-crafted controller that can 
+drive around the oval track.
+
+this gives -
+- baseline test env corectness
+- data for behaviour cloning (later)
+- a sanity check: your physics + track design works
+
+Building:
+	1.	A function that computes the target steering direction
+	2.	A speed controller
+	3.	A simple expert driver loop
+	4.	A basic matplotlib animation render
+
