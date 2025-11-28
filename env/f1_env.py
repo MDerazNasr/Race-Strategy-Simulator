@@ -195,5 +195,4 @@ Your F1Env is wrapping:
 
 into something an RL algorithm can use.
 
-I need to implemnt the go back end
 '''
