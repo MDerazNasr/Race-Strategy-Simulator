@@ -64,8 +64,8 @@ def signed_lateral_error(track, idx, x, y):
     # track tangent returns angle, tangent
     _, tangent = track_tangent(track, idx)
 
-    #normal vector
-    normal = np.array([[-tangent[1]], tangent[0]])
+    #normal vector (perpendicular to tangent)
+    normal = np.array([-tangent[1], tangent[0]])
     '''
     np.linalg.norm(normal) = length (magnitude) of the vector
     For [a, b] it’s sqrt(a^2 + b^2)

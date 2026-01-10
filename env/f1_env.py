@@ -45,25 +45,29 @@ class F1Env(gym.Env):
             high = np.array([1.0, 1.0], dtype=np.float32),
         )
 
-        #Observations: [x,y, cos(yaw), sin(yaw), v ]
+        #Observations: 6D vector from get_obs()
         '''
         observation space, what the agent sees
-        every observation here is a 7D vector:
-            1.	x → car position X
-            2.	y → car position Y
-            3.	cos(yaw)
-            4.	sin(yaw)
-            5.	v → speed
-            6.	dist → distance from the track centerline
-            7.	progress → how far around the track you are (0 to ~1)
+        every observation here is a 6D vector:
+            1.	v → speed
+            2.	heading_error → how misaligned the car is vs the track direction
+            3.	lateral_error → signed distance from centerline
+            4.	sin(heading_error) → for smooth angle representation
+            5.	cos(heading_error) → for smooth angle representation
+            6.	curvature → estimate of track curvature ahead
         
         '''
-        obs_high = np.array( #max magnitude guess
-            [1000, 1000, 1, 1, 100, 100, 1],
+        # Define bounds for each dimension: [v, heading_error, lateral_error, sin, cos, curvature]
+        obs_high = np.array(
+            [100.0, np.pi, 50.0, 1.0, 1.0, np.pi],
+            dtype=np.float32
+        )
+        obs_low = np.array(
+            [0.0, -np.pi, -50.0, -1.0, -1.0, -np.pi],
             dtype=np.float32
         )
         self.observation_space = spaces.Box(
-            low = obs_high,
+            low = obs_low,
             high = obs_high,
             dtype = np.float32
         )
@@ -116,13 +120,13 @@ class F1Env(gym.Env):
 
        #Build observation vector for the RL policy
        #include sin/cos of heading_error to give a smooth angle rep.
-       obs = np.array([
-           v,
-           heading_error,
-           lateral_error,
+       obs = np.array([ #divisions are to normalize all numbers
+           v / 20.0,
+           heading_error / np.pi,
+           lateral_error / 3.0,
            np.sin(heading_error),
            np.cos(heading_error),
-           curvature,
+           curvature / np.pi,
        ], dtype=np.float32)
        
        return obs
@@ -139,17 +143,36 @@ class F1Env(gym.Env):
     def get_info(self):
         return {}
     #starting new episode
+    '''
+    why the following ranges?
+    - +/- 10 deg simulates imperfect alignemnt
+    - 2-6 m/s aboids
+    
+    '''
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.step_count = 0 #reset counter to 0
 
-        #start near first track point, facing tangentially
-        start = self.track[0]
-        self.car.reset(x=start[0], y=start[1], yaw=0.0, v=0.0)  #yaw=0 → currently you’re just pointing in +x direction.
+        #random starting index
+        idx = self.np_random.integers(0, len(self.track))
+        start = self.track[idx]
+
+        # random yaw pertubation (~+/- 10 degrees)
+        yaw = self.np_random.uniform(-0.17, 0.17)
+
+        #small random initial speed
+        v = self.np_random.uniform(2.0, 6.0)
+
+        self.car.reset(
+            x = start[0],
+            y = start[1],
+            yaw=yaw,
+            v=v,
+        )
 
         obs = self.get_obs()
-        info = self.get_info()
-        return obs, info #return initial observation, and info (implemented later)
+        info = {}
+        return obs, info
     
     #advance simulation one tick
     '''

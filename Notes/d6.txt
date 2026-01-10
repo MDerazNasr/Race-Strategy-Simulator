@@ -1,0 +1,70 @@
+w2 d6 - dataset quality, noise injection and robustness
+
+Goal -
+1. your expert data is no longer "fragile"
+2. Your BC policy wont collapse when slightly off track
+3. You understand distribution shift (a core ML concept)
+4. You're setting up RL success before it starts
+
+WHY NAIVE BEHVIOUR CLONING FAILS
+
+Right now, your behvaiour cloning dataset looks like this:
+- Perfect expert driving near the centerline
+
+Why this is dangerous
+- Behavior cloning only learns states it HAS seen
+- if the BC policy drifts slightly:
+    - it enters states the expert never visited 
+    - it has no idea what to do
+    - errors compound -> crash
+
+This is called covariate shift or distribution shift
+- RL can recover from mistakes
+- BC alone usually cannot
+
+FIX - make dataset wider, not better
+- no need for perfect driver
+- we need expert that produces diverse states
+
+we will:
+1. add noise to expert actions
+2. Randomise inital conditions
+3. Collect data from imperfect trajectories
+
+ADDING NOISE
+instead of - 
+action = expert.get_action(car)
+
+we do -
+action = expert_action + noise
+
+Where:
+- noise is small
+- zero-mean
+- cliiped to valid range
+
+Why?
+- Forces expert to recover from mistakes
+- Teaches BC how to correct drift
+
+
+Why Gaussian noise (not uniform)?
+
+This choice matters.
+
+Gaussian noise:
+
+Mostly small changes
+
+Occasionally larger exploration
+
+Smooth, realistic control perturbations
+
+Uniform noise:
+
+All magnitudes equally likely
+
+Can be too aggressive or unnatural
+
+Gaussian noise matches how real control systems behave and works well in RL.
+
