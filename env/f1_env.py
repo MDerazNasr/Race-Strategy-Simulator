@@ -152,56 +152,60 @@ class F1Env(gym.Env):
         return obs, info #return initial observation, and info (implemented later)
     
     #advance simulation one tick
+    '''
+    1. apply the agents action (throttle + steering) to the car
+    2. Advance physics by a small time dt
+    3. compute observation (what the agent sees now)
+    4. compute reward (how good that step was)
+    5. check if episdoe should end (crash/off-track/track limit)
+    6. Return (obs, reward, terminated, truncated, info)
+    This is the whole RL loop
+    '''
     def step(self, action): 
+        # Count how many steps we've taken in this episode
         self.step_count += 1 
-
+        # 1- apply agent action to the car
+        # action is expected to be (throttle, steer)
         throttle, steer = action
-        state = self.car.step(throttle, steer, dt=self.dt) #call step() with curr throttle, steer
+        self.car.step(throttle, steer, dt=self.dt) #call step() with curr throttle, steer
+       
+        # 2 - compute new observation after ther movement
         obs = self.get_obs() #recompute the observation
 
-        #reward: move forward along track, penalise distance from center & low speed
-        x, y, yaw, v = state #state is [x, y, yaw, v] returned from the car.
-        '''
-        Currently:
-            Faster car → higher reward (v * 0.1)
-            Farther from track centerline → penalty (- dist * 0.05)
-
-        So the agent is encouraged to:
-            go fast
-            stay near the track
-        '''
-        idx, dist = closest_point(self.track, x, y)
-        progress = progress_along_track(self.track, idx)
-
-        reward = v * 0.1 - dist * 0.05 #simple placeholder
+        # 3 - extract key values from the observation vector
+        v = obs[0] #speed
+        heading_error = obs[1] # car heading vs track direction
+        lateral_error = obs[2] # signed distance from centerline
 
         '''
-        2 ways an episode could end
-        1.terminated → “natural/real” ending
-            Here: if the car is more than 20 units away from the track, we treat it as going off track.
-            You also give a -10 penalty as a “you screwed up” signal.
-        2.truncated → “artificial/time limit” ending
-            If the episode just lasts too long (step_count >= max_steps)
-            This is not “bad”, just a cut-off.
+        4 - reward
+        - encourage forward progress along track direction
+        - penalise being far from center
+        - penalise pointing away from track direction
         '''
-        terminated = False
-        truncated = False
+        reward = (
+            v * np.cos(heading_error)
+            - 0.5 * abs(lateral_error)
+            - 0.1 * abs(heading_error)
+        )
+        # 5 - episode termination flags (Gym style)
+        terminated = False # ended due to failure (off track)
+        truncated = False # Ended due to time limit
 
-        #End episode if too far form tack or we exceed steps
-        if dist > 20.0:
+        #If too far from the track centerline, and episode and punish strongly
+        if abs(lateral_error) > 3.0:
             terminated = True
-            reward -= 10.0 #penalty for going off-track
-        
+            reward -= 20.0
+        #if we hit max steps, end due to time limit
         if self.step_count >= self.max_steps:
             truncated = True
-        '''
-            obs → what next state looks like
-            reward → how good that action was
-            terminated → did we end for real (off track)?
-            truncated → did we time out?
-            info → extra, not used for learning, but good for logging
-        '''
-        info = {"progress": progress, "dist": dist}
+
+        # Extra debug info (not usually used by the policy directly)
+        info = {
+            "speed": v,
+            "heading_error": heading_error,
+            "lateral_error": lateral_error,
+        }
         return obs, reward, terminated, truncated, info
 
     #skip full rendering for now
