@@ -12,11 +12,6 @@ import sys
 from pathlib import Path
 import matplotlib.pyplot as plt
 
-from utils.geometry import {
-    normalize_angle,
-    track_tangent,
-    signed_lateral_error,
-}
 
 current_file = Path(__file__).resolve()
 project_root = current_file.parent.parent
@@ -24,6 +19,11 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 from env.car_model import Car
 from env.track import generate_oval_track, closest_point, progress_along_track
+from utils.geometry import (
+    normalize_angle,
+    track_tangent,
+    signed_lateral_error,
+)
 
 class F1Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30} #info used for rendering
@@ -85,26 +85,47 @@ class F1Env(gym.Env):
     - etc.
     '''
     def get_obs(self):
-        #pull the car state
-        x, y, yaw, v = self.car.x, self.car.y, self.car.yaw, self.car.v
-        #find the closest track point and the distance to it (track.py)
-        idx, dist = closest_point(self.track, x, y)
-        #covert index into [0,1] progress
-        progress = progress_along_track(self.track, idx)
-        #build observation vector
-        obs = np.array(
-            [
-                x,
-                y,
-                np.cos(yaw),
-                np.sin(yaw),
-                v,
-                dist,
-                progress,
-            ],
-            dtype=np.float32,
-        )
-        return obs
+       #Pull current car state from the environment
+       x,y, yaw, v = self.car.x, self.car.y, self.car.yaw, self.car.v
+
+       #Find the closest waypoint on the track to the car position
+       #closest_point likely returns (index, ___)
+       idx, _ = closest_point(self.track, x,y)
+
+       #Get direction of the track aty that closest point
+       #track_tangent returns (track_angle, tangent_vector)
+       track_angle, _ = track_tangent(self.track, idx)
+
+       #Heading error: how misaligned the car is compared to the track direction
+       #normalise to avoid wrap-around issues at +/- pi
+       heading_error = normalize_angle(track_angle - yaw)
+
+       #Lateral error - signed sideways distance from the track
+       #Positive/Negative indicates left/right relative to track direction
+       lateral_error = signed_lateral_error(self.track, idx, x,y)
+
+       #Simple curvature estimate using a lookahead point
+       # Look 5 waypoints ahead (wrap around the track if needed)
+       idx2 = (idx + 5) % len(self.track)
+
+       #Track direction at the lookahead point
+       angle2, _ = track_tangent(self.track, idx2)
+
+       #Change in track direction = how much the track will turn soon
+       curvature = normalize_angle(angle2 - track_angle)
+
+       #Build observation vector for the RL policy
+       #include sin/cos of heading_error to give a smooth angle rep.
+       obs = np.array([
+           v,
+           heading_error,
+           lateral_error,
+           np.sin(heading_error),
+           np.cos(heading_error),
+           curvature,
+       ], dtype=np.float32)
+       
+       return obs
     '''
     Why cos(yaw) and sin(yaw) instead of yaw directly?
 
