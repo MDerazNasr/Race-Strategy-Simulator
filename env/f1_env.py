@@ -12,6 +12,12 @@ import sys
 from pathlib import Path
 import matplotlib.pyplot as plt
 
+from utils.geometry import {
+    normalize_angle,
+    track_tangent,
+    signed_lateral_error,
+}
+
 current_file = Path(__file__).resolve()
 project_root = current_file.parent.parent
 if str(project_root) not in sys.path:
@@ -63,7 +69,21 @@ class F1Env(gym.Env):
         )
         self.max_steps = 2000 #stop episode after 2000 timestamps to avoid infinite ep
         self.step_count = 0
+    '''
+    in RL your agent needs an observation vector each step: a compact summary of whats going on right now
 
+    This _get_obs() builds an observation that tells the agent:
+    1. speed(v)
+    2. heading error = how misaligned the car is vs the track direction
+    3. lateral error = how far left/right the car is from the track center line
+    4. sin/cos of heading error (helps ML handle angle wrap-around smoothly)
+    5. Curvature estimate = 'is the track turning soon' 
+
+    The policy will learn:
+    - if im on the left of center and the track is bending right, steer right more
+    - if heading error is large, correct steering even if im centered
+    - etc.
+    '''
     def get_obs(self):
         #pull the car state
         x, y, yaw, v = self.car.x, self.car.y, self.car.yaw, self.car.v
