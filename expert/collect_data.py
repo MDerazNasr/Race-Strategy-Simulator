@@ -51,6 +51,7 @@ def run_expert_lap(
         throttle_std = 0.05,
         steer_std = 0.05,
         record_dataset = False,
+        plot = True,
 ):
     '''
     runs one expert lap (episode) and plots trajectory
@@ -103,14 +104,16 @@ def run_expert_lap(
         if terminated or truncated:
             print(f"Episode ended at step {step}. terminated={terminated}, truncated={truncated}")
             break
-    # 5 - plot track and expert path
-    plt.figure(figsize=(6, 6))
-    plt.plot(env.track[:, 0], env.track[:, 1], "--", alpha=0.5, label="Track")
-    plt.plot(xs, ys, "r-", label="Expert Path")
-    plt.axis("equal")
-    plt.legend()
-    plt.title("Expert Driver Trajectory")
-    plt.show()
+
+    # 5 - plot track and expert path (only if requested)
+    if plot:
+        plt.figure(figsize=(6, 6))
+        plt.plot(env.track[:, 0], env.track[:, 1], "--", alpha=0.5, label="Track")
+        plt.plot(xs, ys, "r-", label="Expert Path")
+        plt.axis("equal")
+        plt.legend()
+        plt.title("Expert Driver Trajectory")
+        plt.show()
 
     #6 return recorded dataset
     if record_dataset:
@@ -121,6 +124,64 @@ def run_expert_lap(
         return states, actions
     
     return None
+
+def generate_dataset(
+    num_episodes=50,
+    max_steps=2000,
+    use_noise=True,
+    throttle_std=0.05,
+    steer_std=0.05,
+    output_path="bc/expert_data.npz",
+):
+    """
+    Collect expert demonstrations from multiple episodes and save to .npz file.
+    
+    Args:
+        num_episodes: Number of episodes to collect
+        max_steps: Maximum steps per episode
+        use_noise: Whether to add noise to expert actions
+        throttle_std: Standard deviation for throttle noise
+        steer_std: Standard deviation for steering noise
+        output_path: Path to save the .npz file
+    """
+    all_states = []
+    all_actions = []
+    
+    print(f"Collecting expert data from {num_episodes} episodes...")
+    
+    for episode in range(num_episodes):
+        states, actions = run_expert_lap(
+            max_steps=max_steps,
+            use_noise=use_noise,
+            throttle_std=throttle_std,
+            steer_std=steer_std,
+            record_dataset=True,
+            plot=False,  # Don't plot during batch collection
+        )
+        
+        if states is not None and actions is not None:
+            all_states.append(states)
+            all_actions.append(actions)
+            print(f"Episode {episode+1}/{num_episodes}: Collected {len(states)} samples")
+        else:
+            print(f"Episode {episode+1}/{num_episodes}: Failed to collect data")
+    
+    # Concatenate all episodes
+    if len(all_states) > 0:
+        all_states = np.concatenate(all_states, axis=0)
+        all_actions = np.concatenate(all_actions, axis=0)
+        
+        # Save to .npz file
+        output_file = Path(project_root) / output_path
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        np.savez(output_file, states=all_states, actions=all_actions)
+        print(f"\nSaved dataset to {output_file}")
+        print(f"Total samples: {len(all_states)}")
+        print(f"States shape: {all_states.shape}")
+        print(f"Actions shape: {all_actions.shape}")
+    else:
+        print("Error: No data collected!")
 
 if __name__ == "__main__":
     run_expert_lap()

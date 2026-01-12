@@ -1,0 +1,23 @@
+day 7 - evakluate expert vs BC (Quantative + Qualitative)
+
+What are we evaluating (and why)
+- we compare expert vs Behaviour cloning
+
+core metrics:
+- lap completion rate -> can the policy finish the lap
+- average episode length -> stability over time
+- average reward - overal driving quality
+- mean lateral error -> how weel it says centered
+- crash/ off track rate -> safety
+- Speed profile -> is it timid or agressive
+
+RL interviews love metrics
+
+2 - Define a proper eval protocol
+Rules:
+- same env
+- same random seed distribution
+- no exploration noise
+- fixed number of episodes
+we'll evak each policy on N episodes, record metrics, then comapre means
+
