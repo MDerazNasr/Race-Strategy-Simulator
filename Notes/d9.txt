@@ -1,0 +1,52 @@
+day 9 - reinforcement learning fine-tuning starting with BC
+
+Proximal Policy Optimization (PPO) is a reinforcement learning (RL) algorithm used to train agents to make decisions by maximizing rewards while maintaining training stability.
+
+today
+- setting up PPO training
+- Initialise PPO with your BC weights
+- Train PPO for a few epochs and watch it imporve beyond the expert/BC
+- Understand exactly what PPO is doing (in dummy-friendly terms, with math)
+
+Day 9 goal
+
+By the end of today:
+    PPO runs end-to-end
+    You can load BC weights into PPO correctly
+    You understand the RL objective vs BC objective
+    You can produce a plot showing RL improvement over time
+
+Conceptual difference between BC and RL (IMP)
+
+BC (supervised learning)
+    BC learns: "Given this state, copy what the expert did"
+
+    Mathematically, BC minimizes the mean squared error (MSE) between the expert's actions and the agent's actions.
+
+    MSE - is a loss function that measures the average of the squared differences between the predicted and actual values.
+
+   Note -
+        dataset D is fixed
+        you learn to imitate expert, not improve
+
+Reinforcement Learning (PPO)
+    RL learns - Choose actions that maximize the expected cumulative reward. (long term)
+
+    Mathematically, RL minimizes the negative expected cumulative reward.
+
+    Negative expected cumulative reward - is a loss function that measures the average of the negative rewards received by the agent over time.
+
+    Note -
+        dataset D is not fixed
+        you learn to improve, not just imitate
+
+
+1) Day 9 Implementation Plan (what you do today)
+
+✅ Step A — Wrap env so SB3 can train it
+✅ Step B — Train PPO from scratch as a baseline
+✅ Step C — Load BC weights into PPO’s policy network
+✅ Step D — Train PPO from BC initialization and compare curves
+
+what is SB3?
+- SB3 is a reinforcement learning library that provides a set of tools for training and evaluating reinforcement learning algorithms.
