@@ -160,7 +160,6 @@ def train_bc(
 if __name__ == "__main__":
     policy, save_path = train_bc()
     
-    # Optional: Save additional copy if needed
     torch.save(policy.state_dict(), "bc/bc_policy_final.pt")
     print(f"Saved final BC policy to bc/bc_policy_final.pt")
 
