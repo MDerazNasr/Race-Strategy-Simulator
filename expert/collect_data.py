@@ -100,6 +100,16 @@ def run_expert_lap(
 
         obs, reward, terminated, truncated, info = env.step(action)
 
+        #after obs update
+        if record_dataset:
+            # Extract lateral_error from observation (index 2)
+            lateral_error = obs[2]
+            
+            #if far from centerline, record extra samples
+            if abs(lateral_error) > 0.6:
+                states.append(obs)
+                actions.append(action)
+
         # if episode ends (off-track or max steps), stop
         if terminated or truncated:
             print(f"Episode ended at step {step}. terminated={terminated}, truncated={truncated}")

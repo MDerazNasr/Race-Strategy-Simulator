@@ -56,6 +56,7 @@ class ExpertDataset(Dataset):
 
         state = torch.from_numpy(state) #torch.Size([7])
         action = torch.from_numpy(action) #torch.Size([2])
+        action = torch.clamp(action, -1.0, 1.0)
 
         return state, action
 
@@ -119,7 +120,7 @@ def train_bc(
     policy = BCPolicy(state_dim=state_dim, action_dim=action_dim).to(device) #creates the network and moves it cpu/gpu
 
     #optimiser and loss
-    optimizer = optim.Adam(policy.parameters(), lr=learning_rate) #adam optimizer updates weights to reduce loss, lr is learning rate.
+    optimizer = optim.Adam(policy.parameters(), lr=learning_rate, weight_decay=1e-4) #adam optimizer updates weights to reduce loss, lr is learning rate.
     criterion = nn.MSELoss() #mean squared error loss -> compares predicted action v expert action
 
     #Training loop (core learning)
@@ -134,11 +135,14 @@ def train_bc(
 
             #forward pass
             pred_actions = policy(batch_states)
-            #loss
-            loss = criterion(pred_actions, batch_actions)
+            #loss computation
+            mse_loss = criterion(pred_actions, batch_actions)
+            action_penalty = 0.01 * torch.mean(pred_actions ** 2)
+            loss = mse_loss + action_penalty
             #backward pass, clears old gradients, imp because pytorch accumulates gradients by default
             loss.backward() #backpropogation loss for all weight
             optimizer.step() #adam updates parametres using gardients
+            optimizer.zero_grad() #clear gradients for next iteration
 
             #trackingh loss for printing
             epoch_loss += loss.item() #converts a 1-element tensor into a python float
@@ -149,7 +153,22 @@ def train_bc(
 
     #save trained model
     torch.save(policy.state_dict(), save_path)
-    print(f"Saved BC policy to save {save_path}")
+    print(f"Saved BC policy to {save_path}")
+    
+    return policy, save_path
 
 if __name__ == "__main__":
-    train_bc()
+    policy, save_path = train_bc()
+    
+    # Optional: Save additional copy if needed
+    torch.save(policy.state_dict(), "bc/bc_policy_final.pt")
+    print(f"Saved final BC policy to bc/bc_policy_final.pt")
+
+'''
+Mental Model (Remember This)
+    train_bc.py → creates the policy
+    bc_policy_final.pt → frozen artifact
+    RL training → consumes this artifact
+    Think of it like a pretrained ImageNet model.
+
+'''

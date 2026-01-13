@@ -1,0 +1,251 @@
+Excellent. **Week 2 – Day 8** is where we **fix BC’s weaknesses and lock it in** so RL can safely start next.
+
+Today is still very ML-focused, but more *surgical*: small changes, big payoff.
+
+---
+
+# 🧠 WEEK 2 — DAY 8
+
+## **Improve BC Generalization + Finalize for RL Initialization**
+
+### 🎯 Goal of Day 8
+
+By the end of today:
+
+1. BC is **stable across randomized starts**
+2. BC failures are **understood and mitigated**
+3. BC policy is **clean, normalized, and ready** to initialize PPO
+4. You can justify *why* BC is a good starting point for RL
+
+Think of today as “BC hardening”.
+
+---
+
+## 1️⃣ Diagnose BC Failure Modes (Think First)
+
+From Day 7, BC usually fails in **three places**:
+
+### Typical BC issues
+
+1. **Over-steering oscillations**
+2. **Slow recovery when far from centerline**
+3. **Overly cautious speed** (low mean speed)
+
+These are not bugs — they’re *expected*.
+
+---
+
+## 2️⃣ Fix #1: Reduce Over-Steering (Regularization)
+
+### Why it happens
+
+* MSE loss penalizes large errors equally
+* Network learns sharp steering corrections
+* Leads to oscillations
+
+### Fix: Add **L2 regularization (weight decay)**
+
+📁 **File: `bc/train_bc.py`**
+
+Change optimizer:
+
+```python
+optimizer = optim.Adam(
+    policy.parameters(),
+    lr=learning_rate,
+    weight_decay=1e-4,
+)
+```
+
+### Why `1e-4`?
+
+* Standard value in control tasks
+* Encourages smoother weights
+* Prevents overfitting to noise
+
+---
+
+## 3️⃣ Fix #2: Penalize Aggressive Steering (Loss Shaping)
+
+We slightly penalize large steering outputs.
+
+### Concept
+
+Instead of pure MSE:
+
+[
+L = |a_{pred} - a_{expert}|^2 + \lambda \cdot |a_{pred}|^2
+]
+
+This discourages extreme actions.
+
+---
+
+### Implement custom loss
+
+Replace loss computation:
+
+```python
+mse_loss = criterion(pred_actions, batch_actions)
+action_penalty = 0.01 * torch.mean(pred_actions ** 2)
+loss = mse_loss + action_penalty
+```
+
+### Why `0.01`?
+
+* Small enough not to dominate
+* Big enough to smooth policy
+
+---
+
+## 4️⃣ Fix #3: Improve Recovery Far From Track
+
+### Problem
+
+BC mostly sees *near-center* states.
+
+### Solution: Oversample “bad states”
+
+We already injected noise, but we can do better.
+
+---
+
+### Modify Data Collection (IMPORTANT)
+
+📁 **File: `expert/collect_data.py`**
+
+After stepping the environment:
+
+```python
+# After obs update
+_, _, _, _, lateral_error, *_ = obs
+
+# If far from centerline, record extra samples
+if abs(lateral_error) > 0.6:
+    states.append(obs)
+    actions.append(action)
+```
+
+### Why this works
+
+* Teaches BC how to recover
+* Gives more gradient signal where policy is weakest
+* Mimics DAgger-lite behavior (without complexity)
+
+---
+
+## 5️⃣ Fix #4: Normalize Actions During Training
+
+### Why
+
+* Even with Tanh, gradients can be uneven
+* Helps stable optimization
+
+### Add action normalization
+
+In dataset `__getitem__`:
+
+```python
+action = torch.clamp(action, -1.0, 1.0)
+```
+
+(This is mostly safety, but good practice.)
+
+---
+
+## 6️⃣ Retrain BC (Clean Run)
+
+Now re-run:
+
+```bash
+python -m expert.collect_data
+python -m bc.train_bc
+python -m bc.eval_bc
+```
+
+### What you should observe now
+
+* Less oscillation
+* Better recovery
+* Slightly higher lap completion
+* Slightly smoother trajectories
+
+---
+
+## 7️⃣ Quantitative Re-check (Mini Day 7 Repeat)
+
+Re-run evaluation harness and confirm:
+
+| Metric             | Expected   |
+| ------------------ | ---------- |
+| Lap completion     | ↑ or same  |
+| Mean lateral error | ↓          |
+| Mean speed         | ↑ slightly |
+| Reward             | ↑          |
+
+If something regresses badly → revert last change.
+
+---
+
+## 8️⃣ Freeze BC Policy (IMPORTANT)
+
+Once satisfied:
+
+📁 Save final policy:
+
+```python
+torch.save(policy.state_dict(), "bc/bc_policy_final.pt")
+```
+
+Do **not** touch this again.
+This becomes your **RL initialization**.
+
+---
+
+## 9️⃣ ML Concepts You Just Learned (Big Ones)
+
+You now understand:
+
+* Regularization in control policies
+* Loss shaping
+* Data reweighting / oversampling
+* Why BC is *initialization*, not final solution
+* How to debug learned control policies
+
+These are **core robotics ML skills**.
+
+---
+
+## ✅ Day 8 Checklist
+
+* [ ] BC policy smoother
+* [ ] Fewer oscillations
+* [ ] Better recovery
+* [ ] Final BC model saved
+* [ ] Ready to initialize RL
+
+---
+
+## 🔥 Big Milestone
+
+You have now completed:
+
+* A physics-based environment
+* A rule-based expert
+* A robust imitation policy
+* Proper evaluation & diagnosis
+
+That’s already **stronger than most ML side projects**.
+
+---
+
+## 🚀 Next: **Week 2 – Day 9**
+
+Tomorrow we:
+
+* Prepare PPO configuration
+* Load BC weights into RL
+* Train RL agent *starting from BC*
+* Watch performance jump in minutes instead of hours
+
+When you’re ready, say **continue** and we go full RL.
