@@ -39,25 +39,42 @@ def train():
         policy="MlpPolicy",  # MLP = multilayer perception (feedforward neural net), SB3 uses it default MLP arch unless you override policy_kwargs
         env=env,  # attach env you created so PPO can interacted with it
         learning_rate=3e-4,  # step size of gradient descent
-        n_steps=2048,  # PPO collects rollouts of length n_steps per env.
-        batch_size=256,  # PPO uses minibatches of size 256 from the collected rollout buffer
-        n_epochs=10,  # After collecting the rollout (2048 samples), PPO will iterate over the data 10 times
-        gamma=0.99,  # Discount factor
-        gae_lambda=0.95,  #
-        clip_range=0.2,
-        ent_coef=0.0,
-        verbose=1,
+        n_steps=2048,  # rollout length collected before each update
+        batch_size=256,  # minibatch size for SGD
+        n_epochs=10,  # number of passes over rollout data per update
+        gamma=0.99,  # reward discount factor
+        gae_lambda=0.95,  # advantage estimator bias/variance tradeoff
+        clip_range=0.2,  # PPO clipping strength
+        ent_coef=0.0,  # entropy bonus (exploration)
+        verbose=1,  # print logs
     )
 
     # Tensorboard logging
     model.set_logger(configure("runs/ppo_scratch", ["stdout", "tensorboard"]))
 
-    # Train
+    # Train for 300k environment steps
     model.learn(total_timesteps=300_000)
 
-    # Save
+    # Save trained policy and PPO state
     model.save("rl/ppo_scratch.zip")
 
 
 if __name__ == "__main__":
     train()
+"""
+Explain PPO params like a dummy
+
+learning_rate=3e-4: how big each gradient step is
+
+n_steps=2048: collect 2048 timesteps of experience before an update
+
+batch_size=256: when training on those 2048 steps, use mini-batches
+
+n_epochs=10: how many passes over the collected batch
+
+gamma=0.99: future reward discount (close to 1 means “care about long-term”)
+
+gae_lambda=0.95: advantage estimation smoothing (stability)
+
+clip_range=0.2: PPO’s “don’t change policy too much” limiter
+"""
