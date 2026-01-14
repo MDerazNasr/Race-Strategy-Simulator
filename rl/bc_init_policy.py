@@ -32,6 +32,7 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 
 # subclassing SB3's built in policy
 # making PPO use your class instead of MlpPolicy
+# what am i doing in this following class
 class BCInitPolicy(ActorCriticPolicy):
     """
     Custom policy whose actor network matches our BC MLP:
