@@ -50,3 +50,4 @@ Reinforcement Learning (PPO)
 
 what is SB3?
 - SB3 is a reinforcement learning library that provides a set of tools for training and evaluating reinforcement learning algorithms.
+- it stands for
