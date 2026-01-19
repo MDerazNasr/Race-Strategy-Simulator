@@ -21,6 +21,7 @@ from pathlib import Path
 
 import torch as th
 import torch.nn as nn
+from torch._dynamo.variables.tensor import log
 
 current_file = Path(__file__).resolve()
 project_root = current_file.parent.parent
@@ -45,6 +46,33 @@ class BCInitPolicy(ActorCriticPolicy):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        # Override actor (policy) network
+        self.actor_net = nn.Sequential(
+            nn.Linear(self.features_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, self.action_space.shape[0]),
+            nn.Tanh(),
+        )
+        # Value network (critic): predicts expected return
+        self.critic_net = nn.Sequential(
+            nn.Linear(self.features_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+        )
+        # Rebuild distributions with our nets
+        self._build(lr_schedule=lambda _: 3e-4)
+
+        def forward(self, obs, deterministic=False):
+            features = self.extract_features(obs)
+            actions = self.actor_net(features)
+            values = self.critic_net(features)
+            log_prob = th.zeros((obs.shape[0],), device=obs.device)
+            return actions, values, log_prob
 
         # CONTINUE THE REST
 
