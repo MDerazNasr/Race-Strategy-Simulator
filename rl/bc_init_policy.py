@@ -74,8 +74,6 @@ class BCInitPolicy(ActorCriticPolicy):
             log_prob = th.zeros((obs.shape[0],), device=obs.device)
             return actions, values, log_prob
 
-        # CONTINUE THE REST
-
 
 """
 You want PPO to start from your Behavior Cloning (BC) actor weights.
