@@ -32,14 +32,14 @@ It is used by train_ppo_bc_init.py.
 
 SB3 ACTOR ARCHITECTURE (with net_arch=dict(pi=[128,128], vf=[128,128])):
 =========================================================================
-    obs (shape [B, 6])
+    obs (shape [B, obs_dim])   ← obs_dim = 11 after Part B+A (was 6)
         │
         ▼
-    FlattenExtractor         ← identity for flat obs, just ensures shape (B, 6)
+    FlattenExtractor         ← identity for flat obs, just ensures shape (B, obs_dim)
         │
         ▼
     mlp_extractor.policy_net ← shared trunk for actor
-        Linear(6, 128)
+        Linear(obs_dim, 128)
         ReLU()
         Linear(128, 128)
         ReLU()
@@ -53,10 +53,10 @@ SB3 ACTOR ARCHITECTURE (with net_arch=dict(pi=[128,128], vf=[128,128])):
 
 BC ARCHITECTURE (BCPolicy in bc/train_bc.py):
 =============================================
-    obs (shape [B, 6])
+    obs (shape [B, obs_dim])   ← obs_dim inferred from saved weights
         │
         ▼
-    net[0]: Linear(6, 128)
+    net[0]: Linear(obs_dim, 128)
     net[1]: ReLU()
     net[2]: Linear(128, 128)
     net[3]: ReLU()
@@ -105,8 +105,15 @@ def load_bc_weights_into_ppo(ppo_model, bc_path: str, device: str) -> None:
     """
 
     # ── Load the trained BC policy ──────────────────────────────────────────
-    bc = BCPolicy(state_dim=6, action_dim=2).to(device)
-    bc.load_state_dict(torch.load(bc_path, map_location=device, weights_only=True))
+    # Auto-detect state_dim from saved weights so this works for any obs size.
+    # 'net.0.weight' has shape (hidden_dim, state_dim) — the input dimension
+    # is in axis 1.  This means no hardcoded "6" here; 11D obs just works.
+    ckpt = torch.load(bc_path, map_location=device, weights_only=True)
+    state_dim = ckpt["net.0.weight"].shape[1]   # e.g. 11 after Part B+A
+    action_dim = ckpt["net.4.weight"].shape[0]  # always 2
+
+    bc = BCPolicy(state_dim=state_dim, action_dim=action_dim).to(device)
+    bc.load_state_dict(ckpt)
     bc.eval()
 
     # Extract only the Linear layers from BC's Sequential net.
@@ -157,8 +164,11 @@ def verify_transfer(ppo_model, bc_path: str, device: str) -> None:
 
     Use after calling load_bc_weights_into_ppo() to confirm correctness.
     """
-    bc = BCPolicy(state_dim=6, action_dim=2).to(device)
-    bc.load_state_dict(torch.load(bc_path, map_location=device, weights_only=True))
+    ckpt = torch.load(bc_path, map_location=device, weights_only=True)
+    state_dim  = ckpt["net.0.weight"].shape[1]
+    action_dim = ckpt["net.4.weight"].shape[0]
+    bc = BCPolicy(state_dim=state_dim, action_dim=action_dim).to(device)
+    bc.load_state_dict(ckpt)
     bc.eval()
 
     bc_layers = [m for m in bc.net if isinstance(m, torch.nn.Linear)]

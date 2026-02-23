@@ -1,0 +1,70 @@
+  PART B — Observation Engineering
+
+  Why the current 6D obs is not enough
+
+  Right now your agent's "eyes" look like this:
+
+  obs = [speed, heading_error, lateral_error, sin(h), cos(h), curvature_5wpts_ahead]
+
+  The curvature term only looks 5 waypoints ahead, which at 20 m/s = roughly 1.5
+  seconds of lookahead. That's too late. By the time the agent "sees" a corner, it's
+   already entering it. Real F1 drivers start braking 3–5 seconds before a corner.
+  They use visual information 200+ metres ahead.
+
+  The other missing piece: track progress. The agent has no idea where it is on the
+  lap. It can't learn "I'm approaching the hairpin, I should start braking" because
+  it doesn't know it's approaching the hairpin.
+
+  What we're adding
+
+  obs = [
+      v/20,            # speed (already had this)
+      h_err/π,         # heading alignment (already had this)
+      lat_err/3,       # lateral position (already had this)
+      sin(h_err),      # smooth angle (already had this)
+      cos(h_err),      # smooth angle (already had this)
+      curv_near/π,     # curvature  5 waypoints ahead  ← was single curvature
+      curv_mid/π,      # curvature 15 waypoints ahead  ← NEW
+      curv_far/π,      # curvature 30 waypoints ahead  ← NEW
+      progress,        # lap progress [0,1]             ← NEW
+  ]
+
+  6D → 9D. Three new dimensions, two changes to existing code.
+
+  The Math: what is curvature here?
+
+  Curvature at a waypoint = how much the track direction changes between that
+  waypoint and the next one. More precisely:
+
+  curvature(idx) = normalize_angle( angle_at(idx+1) - angle_at(idx) )
+
+  normalize_angle wraps the result to [-π, π].
+
+  At a sharp right corner: curvature ≈ -0.15 rad (negative = right turn)
+  On a straight: curvature ≈ 0.0
+  At a sharp left corner: curvature ≈ +0.15 rad
+
+  We already compute this for idx+5. We're just doing it two more times, at idx+15
+  and idx+30, using % len(self.track) to wrap around if we go past the end.
+
+  Why 5, 15, 30?
+  At dt=0.1s and v=20m/s, each step covers ~2m. The oval track's 200 waypoints span
+  314m (2π×50m), so each waypoint is ~1.57m apart.
+
+  - 5 waypoints ≈ 7.9m ≈ 0.4s ahead → immediate reaction
+  - 15 waypoints ≈ 23.5m ≈ 1.2s ahead → corner entry planning
+  - 30 waypoints ≈ 47m ≈ 2.4s ahead → braking point detection
+
+  That's the timescale a real driver uses.
+
+  The Math: what is track progress?
+
+  progress = idx / len(track)     # a number in [0.0, 1.0]
+
+  idx is already computed by closest_point(). Divide by the total number of
+  waypoints. At the start line: 0.0. Halfway around: 0.5. Just before the start line
+   again: 0.99.
+
+  This gives the policy a positional encoding — it can learn "when progress ≈ 0.5
+  the track starts turning, apply more steering" without us programming that rule
+  in. The RL finds it from reward.

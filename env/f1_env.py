@@ -17,7 +17,7 @@ current_file = Path(__file__).resolve()
 project_root = current_file.parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
-from env.car_model import Car
+from env.car_model import Car, DynamicCar
 from env.track import generate_oval_track, closest_point, progress_along_track
 from utils.geometry import (
     normalize_angle,
@@ -37,8 +37,13 @@ class F1Env(gym.Env):
         #Track
         self.track = generate_oval_track() #you generate a simple circular-ish track (list of (x,y) points)
 
-        #Car
-        self.car = Car() #create a car using the model you wrote earlier
+        # ── Car ──────────────────────────────────────────────────────────
+        # PART A: swapped kinematic Car → DynamicCar.
+        # DynamicCar has the same .x, .y, .yaw, .v interface as Car,
+        # but internally runs a 6-state dynamic model with tyre slip physics.
+        # The rest of the environment code doesn't need to change because
+        # DynamicCar exposes backward-compatible .yaw and .v properties.
+        self.car = DynamicCar()
 
         #Action: [throttle, steer_norm]
         self.action_space = spaces.Box(
@@ -46,25 +51,70 @@ class F1Env(gym.Env):
             high = np.array([1.0, 1.0], dtype=np.float32),
         )
 
-        #Observations: 6D vector from get_obs()
+        # ── Observations: 11D vector from get_obs() ─────────────────────
         '''
-        observation space, what the agent sees
-        every observation here is a 6D vector:
-            1.	v → speed
-            2.	heading_error → how misaligned the car is vs the track direction
-            3.	lateral_error → signed distance from centerline
-            4.	sin(heading_error) → for smooth angle representation
-            5.	cos(heading_error) → for smooth angle representation
-            6.	curvature → estimate of track curvature ahead
-        
+        PART B + PART A: expanded observation vector.
+
+        Original 6D obs was sufficient for a kinematic car, but the dynamic
+        model adds two new state variables (v_y, r) that the agent MUST see
+        to understand and control tyre slip.  We also give the agent a richer
+        view of the track ahead with THREE curvature samples instead of one.
+
+        FULL 11D OBSERVATION:
+          idx  value                  what it tells the agent
+          ─────────────────────────────────────────────────────────────────
+          [0]  v / 20.0               how fast are we going?
+          [1]  heading_error / π      are we pointed at the track?
+          [2]  lateral_error / 3.0    are we on the racing line?
+          [3]  sin(heading_error)     smooth angle encoding (avoids ±π wrap)
+          [4]  cos(heading_error)     smooth angle encoding
+          [5]  curv_near / π          track curvature  5 waypoints ahead
+          [6]  curv_mid  / π          track curvature 15 waypoints ahead  ← NEW (Part B)
+          [7]  curv_far  / π          track curvature 30 waypoints ahead  ← NEW (Part B)
+          [8]  progress               how far around the lap are we? [0, 1] ← NEW (Part B)
+          [9]  v_y / 5.0              sideways sliding speed               ← NEW (Part A)
+          [10] r   / 2.0              yaw rate (spinning speed)            ← NEW (Part A)
+
+        WHY THREE CURVATURE SAMPLES?
+          One sample (5 waypoints) tells you about the NEXT corner entry.
+          At high speed (19 m/s), 5 waypoints ≈ 0.5 s ahead.  For a sharp
+          corner, that's barely enough to start braking.
+
+          Adding 15-waypoint (≈1.5 s) and 30-waypoint (≈3 s) samples gives
+          the agent a "track map" horizon:
+            curv_near → what to do RIGHT NOW
+            curv_mid  → what to prepare for in the next second
+            curv_far  → can I carry speed through this section?
+
+          This is analogous to a human driver reading the road far ahead.
+
+        WHY v_y AND r?
+          With the kinematic model, v_y = 0 by construction — the car never
+          slides.  The agent had no way to see tyre slip.
+
+          With DynamicCar, the rear can slide during hard cornering.
+          Without v_y and r in the obs, the agent is flying blind: it can't
+          distinguish "car gripping" from "car sliding into a spin".
+
+          v_y > 0 = sliding right, < 0 = sliding left.
+          r   > 0 = yaw rate increasing (turning left), < 0 = turning right.
+          Together they let the agent detect and counter oversteer before it
+          becomes a spin — the same reflex that makes a skilled F1 driver.
+
+        WHY PROGRESS?
+          Without progress, the agent has no idea where it is on the lap.
+          It cannot learn lap-specific strategies ("brake early at this corner").
+          Adding idx/len(track) ∈ [0, 1] gives a compressed map position.
         '''
-        # Define bounds for each dimension: [v, heading_error, lateral_error, sin, cos, curvature]
+        # Define bounds for each dimension (generous bounds — Gym clips if exceeded).
+        # Normalised values will always be well within these ranges during training.
         obs_high = np.array(
-            [100.0, np.pi, 50.0, 1.0, 1.0, np.pi],
+            # v    h_err  lat  sin  cos  c_near c_mid c_far  prog v_y   r
+            [100.0, np.pi, 50.0, 1.0, 1.0, np.pi, np.pi, np.pi, 1.0, 20.0, 5.0],
             dtype=np.float32
         )
         obs_low = np.array(
-            [0.0, -np.pi, -50.0, -1.0, -1.0, -np.pi],
+            [0.0, -np.pi, -50.0, -1.0, -1.0, -np.pi, -np.pi, -np.pi, 0.0, -20.0, -5.0],
             dtype=np.float32
         )
         self.observation_space = spaces.Box(
@@ -99,55 +149,96 @@ class F1Env(gym.Env):
     - etc.
     '''
     def get_obs(self):
-       #Pull current car state from the environment
-       x,y, yaw, v = self.car.x, self.car.y, self.car.yaw, self.car.v
+        """
+        Build the 11D observation vector from the current car + track state.
 
-       #Find the closest waypoint on the track to the car position
-       #closest_point likely returns (index, ___)
-       idx, _ = closest_point(self.track, x,y)
+        DIMENSIONS:
+          [0]  v / 20.0            — normalised speed
+          [1]  heading_error / π   — how misaligned the car is with the track
+          [2]  lateral_error / 3.0 — signed sideways distance from centreline
+          [3]  sin(heading_error)  — smooth angle encoding
+          [4]  cos(heading_error)  — smooth angle encoding
+          [5]  curv_near / π       — curvature  5 wpts ahead  (≈ 0.5 s at 19 m/s)
+          [6]  curv_mid  / π       — curvature 15 wpts ahead  (≈ 1.5 s)
+          [7]  curv_far  / π       — curvature 30 wpts ahead  (≈ 3.0 s)
+          [8]  progress            — lap progress ∈ [0, 1]
+          [9]  v_y / 5.0           — normalised lateral (sliding) velocity
+          [10] r   / 2.0           — normalised yaw rate
 
-       #Get direction of the track aty that closest point
-       #track_tangent returns (track_angle, tangent_vector)
-       track_angle, _ = track_tangent(self.track, idx)
+        CURVATURE FORMULA (same for all three lookahead distances):
+          curv = normalize_angle( angle_at_lookahead - angle_at_current )
+          Positive = track bending left, negative = bending right.
+          Magnitude = how sharp the bend is.
 
-       #Heading error: how misaligned the car is compared to the track direction
-       #normalise to avoid wrap-around issues at +/- pi
-       heading_error = normalize_angle(track_angle - yaw)
+        PROGRESS:
+          progress = idx / len(track)
+          0 = start/finish line, 1 = just before start/finish.
+          A continuous signal; the agent can learn position-specific behaviour
+          (e.g., "I'm at the long straight — hold max throttle").
+        """
+        # ── Pull current car state ─────────────────────────────────────
+        x, y = self.car.x, self.car.y
+        yaw  = self.car.yaw   # works for both Car (.yaw) and DynamicCar (.yaw alias)
+        v    = self.car.v     # total speed — DynamicCar .v = sqrt(v_x²+v_y²)
 
-       #Lateral error - signed sideways distance from the track
-       #Positive/Negative indicates left/right relative to track direction
-       lateral_error = signed_lateral_error(self.track, idx, x,y)
+        # ── Find closest waypoint on the track ────────────────────────
+        idx, _ = closest_point(self.track, x, y)
+        n_wpts = len(self.track)
 
-       #Simple curvature estimate using a lookahead point
-       # Look 5 waypoints ahead (wrap around the track if needed)
-       idx2 = (idx + 5) % len(self.track)
+        # ── Track direction and errors at current position ─────────────
+        track_angle, _ = track_tangent(self.track, idx)
+        heading_error  = normalize_angle(track_angle - yaw)
+        lateral_error  = signed_lateral_error(self.track, idx, x, y)
 
-       #Track direction at the lookahead point
-       angle2, _ = track_tangent(self.track, idx2)
+        # ── PART B: Three curvature samples ────────────────────────────
+        # curv_near: 5 waypoints ahead  — immediate turn entry
+        idx_near  = (idx +  5) % n_wpts
+        angle_near, _ = track_tangent(self.track, idx_near)
+        curv_near = normalize_angle(angle_near - track_angle)
 
-       #Change in track direction = how much the track will turn soon
-       curvature = normalize_angle(angle2 - track_angle)
+        # curv_mid: 15 waypoints ahead  — ~1.5 s planning horizon
+        idx_mid   = (idx + 15) % n_wpts
+        angle_mid, _ = track_tangent(self.track, idx_mid)
+        curv_mid  = normalize_angle(angle_mid - track_angle)
 
-       #Build observation vector for the RL policy
-       #include sin/cos of heading_error to give a smooth angle rep.
-       obs = np.array([ #divisions are to normalize all numbers
-           v / 20.0,
-           heading_error / np.pi,
-           lateral_error / 3.0,
-           np.sin(heading_error),
-           np.cos(heading_error),
-           curvature / np.pi,
-       ], dtype=np.float32)
-       
-       return obs
+        # curv_far: 30 waypoints ahead  — ~3.0 s planning horizon
+        idx_far   = (idx + 30) % n_wpts
+        angle_far, _ = track_tangent(self.track, idx_far)
+        curv_far  = normalize_angle(angle_far - track_angle)
+
+        # ── PART B: Lap progress ───────────────────────────────────────
+        # Linear fraction of the lap completed: 0.0 at start, ~1.0 just before lap end.
+        progress = idx / n_wpts
+
+        # ── PART A: Dynamic state (lateral velocity + yaw rate) ────────
+        # For DynamicCar these are real physics states.
+        # For the old kinematic Car they are always 0.0 (backward compatible).
+        v_y = getattr(self.car, 'v_y', 0.0)   # lateral sliding speed (m/s)
+        r   = getattr(self.car, 'r',   0.0)   # yaw rate (rad/s)
+
+        # ── Assemble 11D observation vector ────────────────────────────
+        obs = np.array([
+            v             / 20.0,   # [0]  speed
+            heading_error / np.pi,  # [1]  heading error
+            lateral_error / 3.0,    # [2]  lateral error
+            np.sin(heading_error),  # [3]  sin(heading)
+            np.cos(heading_error),  # [4]  cos(heading)
+            curv_near     / np.pi,  # [5]  near curvature
+            curv_mid      / np.pi,  # [6]  mid  curvature
+            curv_far      / np.pi,  # [7]  far  curvature
+            progress,               # [8]  lap progress
+            v_y           / 5.0,    # [9]  lateral velocity
+            r             / 2.0,    # [10] yaw rate
+        ], dtype=np.float32)
+
+        return obs
     '''
-    Why cos(yaw) and sin(yaw) instead of yaw directly?
+    Why sin(heading_error) and cos(heading_error) instead of heading_error directly?
 
-        because angles wrap around
-        yaw = π and yaw = -π are basically the same direction,
-        but a neural net might treat them as very different numbers.
-
-        Using (cos, sin) gives a smooth, continuous representation.
+        Angles wrap around: heading_error = +π and -π are the same direction,
+        but a neural net treats them as very different numbers (large positive vs
+        large negative).  sin/cos encode the angle as a point on the unit circle,
+        which is continuous and smooth at all angles — no discontinuity at ±π.
     '''
     
     def get_info(self):
@@ -237,6 +328,9 @@ class F1Env(gym.Env):
             "speed":         obs[0] * 20.0,   # un-normalize back to m/s for readability
             "heading_error": obs[1] * np.pi,  # un-normalize back to radians
             "lateral_error": obs[2] * 3.0,    # un-normalize back to meters
+            # PART A: expose dynamic states for TensorBoard and evaluation
+            "v_y":           obs[9]  * 5.0,   # lateral sliding speed (m/s)
+            "yaw_rate":      obs[10] * 2.0,   # yaw rate (rad/s)
         }
         return obs, reward, terminated, truncated, info
 
