@@ -1,0 +1,297 @@
+DAY 10 — PPO Bug Fixes, Reward Shaping, and First Clean Training Run
+======================================================================
+Week 2 | BC + RL pipeline | First verified BC → PPO weight transfer
+
+-----------------------------------------------------------------------
+SESSION GOAL
+-----------------------------------------------------------------------
+Fix the PPO training pipeline (which had 3 silent bugs),
+implement proper reward shaping, and run the first clean comparison
+between PPO from scratch vs PPO initialized with BC weights.
+
+-----------------------------------------------------------------------
+BUGS FOUND AND FIXED (READ THIS — these were silent, no errors thrown)
+-----------------------------------------------------------------------
+
+BUG 1 — Missing final layer in BC → PPO weight transfer
+  File: rl/train_ppo_bc_init.py
+
+  The load_bc_into_ppo() function copied only 2 of the 3 BC layers.
+  The comment said "bc_layers[2] → action_net" but the code never
+  actually did it. The action head (128 → 2) stayed RANDOM despite
+  the BC warm start.
+
+  Effect: The agent had a good trunk but produced garbage actions.
+  BC initialization was effectively useless.
+
+  Fix: Added action_net.weight.copy_(bc_layers[2].weight) and
+       action_net.bias.copy_(bc_layers[2].bias)
+
+  Lesson: Always verify weight transfers. We added verify_transfer()
+  which checks max absolute difference. All 6 values now print 0.00e+00.
+
+---
+
+BUG 2 — Termination threshold applied to normalized observation
+  File: env/f1_env.py
+
+  The observation vector stores lateral_error as raw / 3.0 (normalized).
+  The termination check was: if abs(lateral_error) > 3.0
+  But lateral_error is already normalized by 3.0, so this fired only
+  when the raw error exceeded 9.0 meters — almost never on a 50m oval.
+
+  Effect: Episodes almost never terminated from going off-track.
+  The agent never received the -20 terminal penalty, so it never learned
+  that "crashing is catastrophic." It just wandered until max_steps=2000.
+
+  Fix: Changed threshold from 3.0 → 1.0
+       (1.0 normalized = 3.0 meters raw, which was the intended limit)
+
+  Lesson: Normalization is a footgun. Any threshold that touches an
+  observation must account for how that observation was scaled.
+
+---
+
+BUG 3 — bc_init_policy.py: forward() was a local function, not a method
+  File: rl/bc_init_policy.py
+
+  The original code had:
+      def __init__(self, *args, **kwargs):
+          ...
+          def forward(self, obs, ...):   ← INDENTED inside __init__
+              ...
+              log_prob = th.zeros(...)   ← also: zeros break PPO
+
+  In Python, a def inside a method body creates a local variable,
+  not a class method. The class silently inherited ActorCriticPolicy.forward().
+  No error is raised. The override simply never existed.
+
+  Additionally: returning log_prob = zeros makes PPO's policy gradient
+  term ∇ log π(a|s) = 0 always. The probability ratio r_t = 1 everywhere.
+  The clipped objective has zero gradient. The actor never updates.
+
+  Fix: Rewrote bc_init_policy.py as a clean utility module with two
+  functions: load_bc_weights_into_ppo() and verify_transfer().
+  The custom subclass approach was unnecessary — SB3's policy_kwargs
+  already handles architecture matching cleanly.
+
+-----------------------------------------------------------------------
+REWARD SHAPING — What was built
+-----------------------------------------------------------------------
+File: rl/rewards.py — new RacingReward class
+
+The old inline reward in f1_env.py:
+    reward = v * cos(heading_error) - 0.5 * |lat| - 0.1 * |heading|
+    terminated if abs(lateral_error) > 3.0  ← bug (see above)
+
+The new RacingReward.compute():
+
+    1. PROGRESS (weight 1.0)
+       progress = v_norm * cos(heading_error)
+       This is the forward velocity component along the track direction.
+       v · cos(ψ) = longitudinal speed. Max ≈ 1.0 when fast and aligned.
+       This is the PRIMARY signal. Everything else is secondary.
+
+    2. SPEED BONUS (weight 0.1)
+       speed = v_norm * 0.1
+       Small incentive to build speed. Kept small to avoid agent
+       learning to speed into corners (where speed bonus > crash penalty).
+
+    3. LATERAL PENALTY — QUADRATIC (weight 0.5)
+       penalty = 0.5 * lateral_error²
+       Quadratic is better than linear here:
+         - Near center (lat ≈ 0): weak penalty → freedom to take racing line
+         - Near limits (lat ≈ 1): strong penalty → keep away from walls
+       Linear would give same gradient everywhere which is wrong for racing.
+
+    4. HEADING PENALTY — QUADRATIC (weight 0.1)
+       penalty = 0.1 * heading_error²
+
+    5. SMOOTHNESS PENALTY (weight 0.05)
+       penalty = steer_delta² + 0.5 * throttle_delta²
+       Penalizes change in steering/throttle between consecutive steps.
+       F1 reason: abrupt steering causes tyre slip → slower.
+       RL reason: smooth policies generalize better from sim to real.
+
+    6. TERMINAL PENALTY (20.0)
+       Large one-time penalty for going off-track.
+       Must be > 5× the per-step reward at max speed to ensure the
+       agent "fears" crashing more than it values one good step.
+       Max per-step reward ≈ 1.1. Terminal = 20. 20 > 5×1.1 ✓
+
+The env was also updated to:
+  - Import and call RacingReward
+  - Store _prev_action each step (for smoothness term)
+  - Return un-normalized values in info dict (meters, radians, m/s)
+
+Why separate reward from env?
+  - Can unit-test reward logic independently
+  - Can swap reward for curriculum learning (Week 4)
+  - Clean architecture: env handles physics, reward handles objectives
+
+Theory note (Ng, Harada & Russell 1999):
+  Potential-based shaping F(s,a,s') = γΦ(s') - Φ(s) preserves the
+  optimal policy. Arbitrary shaping can change the optimal policy.
+  Our reward is not strictly potential-based, but each term is
+  carefully sized so dominant term (progress) aligns with the
+  task objective.
+
+-----------------------------------------------------------------------
+TRAINING RESULTS
+-----------------------------------------------------------------------
+Both runs: 300,000 timesteps, same PPO hyperparameters, new reward function.
+Plots saved to: plots/training_deep_dive.png, plots/training_comparison.png
+
+PPO Scratch (no BC init):
+  ep_rew_mean at step     2k:   -38.87
+  ep_rew_mean at step    75k:   -77.98
+  ep_rew_mean at step   150k:   -91.26
+  ep_rew_mean at step   300k:  -113.37
+  Peak ep_rew_mean:             -38.46  (at step 4096 — it only got worse)
+  Final ep_len_mean:           1150 steps
+  Final explained_variance:       0.9988
+
+PPO + BC Init (fixed weight transfer + new reward):
+  ep_rew_mean at step     2k:   -15.75   ← already 2.5x better, no training yet
+  ep_rew_mean at step    75k:  +458.10   ← crossed into positive reward
+  ep_rew_mean at step   150k:  +468.16
+  ep_rew_mean at step   300k:  +668.67
+  Peak ep_rew_mean:            +687.58   (at step 296,960)
+  Final ep_len_mean:            462 steps
+  Final explained_variance:       0.2605
+
+KEY NUMBERS:
+  BC-init final reward vs scratch final reward: +668 vs -113
+  BC-init peak reward: +687
+  BC-init reached positive reward by: ~75k steps
+  Scratch peak reward (best ever): -38.46 (step 4096)
+
+-----------------------------------------------------------------------
+ANALYSIS — WHY SCRATCH FAILED
+-----------------------------------------------------------------------
+Scratch's episode length grew from 73 → 1150 steps while reward fell
+from -38 → -113. Longer episodes with worse rewards = pathological strategy.
+
+The scratch agent found a local optimum: go very slowly (v_norm ≈ 0),
+roughly aligned with track, don't crash.
+
+Per-step reward at v_norm ≈ 0.1, small errors:
+  progress ≈ 0.1 * 0.9 ≈ 0.09
+  lat penalty ≈ -0.05
+  heading penalty ≈ -0.02
+  Net ≈ +0.02 ... -0.10 per step
+
+Over 1150 steps this gives roughly -100 to -115 total. Exactly what we see.
+
+The agent never discovered the +1.0/step regime that comes from driving
+at full speed (v_norm ≈ 1.0, cos(ψ) ≈ 1.0). Random exploration with
+PPO couldn't escape the "slow drift" basin because that basin is very
+wide and the high-speed region requires very specific coordinated actions
+(throttle + aligned steering simultaneously) that random policy never
+achieves.
+
+This is why BC initialization matters: it bypasses the exploration
+problem entirely by starting IN the high-speed, low-drift regime.
+
+ANALYSIS — SCRATCH'S EXPLAINED VARIANCE = 0.9988
+  This looks like the critic is performing well. It isn't.
+  It means the critic has perfectly learned to predict
+  "every return is about -113." That is "correct" but useless.
+  The critic mastered a bad situation.
+  Compare BC-init EV = 0.26 at the end: critic is still
+  trying to catch up with an improving policy. That's active learning.
+
+ANALYSIS — BC-INIT REWARD DIP (~150-250k steps)
+  Reward dropped from ~500 to ~400 before recovering to 668.
+  This is PPO's known instability pattern:
+    1. Policy found high-reward trajectory early
+    2. clip_range=0.2 allowed 20% ratio changes per step
+    3. Compounding updates pushed policy slightly out of good region
+    4. Value function re-calibrated
+    5. Policy stabilized and continued improving
+  Fix for this: reduce clip_range to 0.1, or add ent_coef=0.005
+  (entropy bonus prevents the policy collapsing too sharply).
+  This is a Week 4 topic.
+
+-----------------------------------------------------------------------
+KEY ML CONCEPTS LEARNED THIS SESSION
+-----------------------------------------------------------------------
+
+1. Silent bugs are worse than loud bugs
+   Three bugs caused months of wasted training time if undetected.
+   None threw an error. Defensive verification (verify_transfer)
+   catches these.
+
+2. Weight transfer must cover ALL layers
+   Trunk + head. Copying only the trunk is like transplanting a brain
+   but leaving the motor cortex behind. The agent thinks correctly
+   but can't act on it.
+
+3. Observation normalization requires consistent thresholds
+   Any hard-coded threshold that compares against an observation
+   must use the same normalization the observation uses.
+   "3 meters" in real space ≠ "3.0" in normalized space.
+
+4. Quadratic penalties vs linear penalties
+   For track limits: quadratic gives a gradient that scales with
+   how far you are from center. Linear gives constant gradient everywhere.
+   Quadratic is better for "allow racing line freedom, penalize
+   track limit violations."
+
+5. Local optima in sparse-reward RL
+   Without a good prior, PPO finds the widest, easiest basin.
+   On a racing task that basin is "idle slowly near center."
+   BC initialization provides a prior that starts the agent in the
+   correct region of policy space.
+
+6. Explained variance as a diagnostic
+   High EV + bad policy = critic mastered a bad regime.
+   Low EV + good policy = critic is catching up to an improving agent.
+   You cannot judge critic health from EV alone.
+
+7. PPO policy forgetting
+   On-policy algorithms can destructively update themselves.
+   Mitigation: lower clip_range, entropy bonus, lr decay.
+   This is why off-policy algorithms (SAC, TD3) are sometimes preferred
+   for continuous control — they don't have this instability.
+
+-----------------------------------------------------------------------
+FILES CHANGED THIS SESSION
+-----------------------------------------------------------------------
+rl/bc_init_policy.py    — rewrote as clean utility (load + verify)
+rl/train_ppo_bc_init.py — fixed missing action_net copy, added verify
+rl/rewards.py           — new RacingReward class (was empty)
+env/f1_env.py           — fixed termination threshold, wired RacingReward
+                          stored _prev_action, improved info dict
+New artifacts:
+  rl/ppo_scratch_v2.zip
+  rl/ppo_bc_init_v2.zip
+  runs/ppo_scratch_v2/
+  runs/ppo_bc_init_v2/
+  plots/training_comparison.png
+  plots/training_deep_dive.png
+
+To view TensorBoard:
+  source venv/bin/activate
+  tensorboard --logdir runs/
+  open http://localhost:6006
+
+-----------------------------------------------------------------------
+NEXT SESSION OPTIONS
+-----------------------------------------------------------------------
+Option A: PPO stability fixes
+  - Add ent_coef=0.005 (entropy regularization)
+  - Reduce clip_range to 0.1
+  - Add cosine learning rate schedule
+  - Goal: fix the 150-250k dip and get smoother convergence
+
+Option B: Evaluation script
+  - Build rl/evaluate.py to rollout all 3 policies (expert, BC, PPO)
+  - Metrics: lap completion rate, mean speed, mean lateral error
+  - Head-to-head comparison table
+
+Option C: Week 3 — Vehicle Dynamics
+  - Replace kinematic bicycle with dynamic model
+  - Add tyre slip angles (Pacejka magic formula)
+  - Add load transfer under braking/cornering
+  - More realistic, closer to real F1 simulation
