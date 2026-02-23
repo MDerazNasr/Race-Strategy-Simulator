@@ -24,6 +24,7 @@ from utils.geometry import (
     track_tangent,
     signed_lateral_error,
 )
+from rl.rewards import RacingReward
 
 class F1Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30} #info used for rendering
@@ -71,8 +72,17 @@ class F1Env(gym.Env):
             high = obs_high,
             dtype = np.float32
         )
-        self.max_steps = 2000 #stop episode after 2000 timestamps to avoid infinite ep
+        self.max_steps = 2000  # stop episode after 2000 steps to avoid infinite episodes
         self.step_count = 0
+
+        # Reward function — modular so it can be swapped for curriculum learning later.
+        # All reward logic lives in rl/rewards.py; the env just calls it.
+        self.reward_fn = RacingReward()
+
+        # Track the previous action so the smoothness penalty has something to compare.
+        # None on the first step of each episode; RacingReward handles this gracefully.
+        self._prev_action = None
+        self._prev_obs = None
     '''
     in RL your agent needs an observation vector each step: a compact summary of whats going on right now
 
@@ -151,7 +161,9 @@ class F1Env(gym.Env):
     '''
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        self.step_count = 0 #reset counter to 0
+        self.step_count = 0       # reset step counter
+        self._prev_action = None  # clear previous action (no smoothness penalty on step 0)
+        self._prev_obs = None     # clear previous obs
 
         #random starting index
         idx = self.np_random.integers(0, len(self.track))
@@ -184,50 +196,47 @@ class F1Env(gym.Env):
     6. Return (obs, reward, terminated, truncated, info)
     This is the whole RL loop
     '''
-    def step(self, action): 
+    def step(self, action):
         # Count how many steps we've taken in this episode
-        self.step_count += 1 
-        # 1- apply agent action to the car
-        # action is expected to be (throttle, steer)
+        self.step_count += 1
+
+        # 1. Apply agent action to the car physics model.
         throttle, steer = action
-        self.car.step(throttle, steer, dt=self.dt) #call step() with curr throttle, steer
-       
-        # 2 - compute new observation after ther movement
-        obs = self.get_obs() #recompute the observation
+        self.car.step(throttle, steer, dt=self.dt)
 
-        # 3 - extract key values from the observation vector
-        v = obs[0] #speed
-        heading_error = obs[1] # car heading vs track direction
-        lateral_error = obs[2] # signed distance from centerline
+        # 2. Compute observation from the new car state.
+        obs = self.get_obs()
 
-        '''
-        4 - reward
-        - encourage forward progress along track direction
-        - penalise being far from center
-        - penalise pointing away from track direction
-        '''
-        reward = (
-            v * np.cos(heading_error)
-            - 0.5 * abs(lateral_error)
-            - 0.1 * abs(heading_error)
+        # 3. Determine termination before computing reward, because the
+        #    terminal penalty is baked into RacingReward.compute().
+        lateral_error = obs[2]  # normalized: raw / 3.0, range ≈ [-1, 1]
+
+        # Terminate if car goes more than 3.0 m off centerline.
+        # lateral_error is normalized by 3.0, so threshold = 1.0 normalized.
+        # (Previous bug: threshold was 3.0 on the normalized value = 9m raw,
+        #  which almost never fired and broke the terminal learning signal.)
+        terminated = abs(lateral_error) > 1.0   # 1.0 normalized = 3.0 m raw
+        truncated  = self.step_count >= self.max_steps
+
+        # 4. Compute shaped reward via the modular RacingReward class.
+        #    All reward math and hyperparameters live in rl/rewards.py.
+        reward = self.reward_fn.compute(
+            obs=obs,
+            prev_obs=self._prev_obs,
+            action=np.array(action, dtype=np.float32),
+            prev_action=self._prev_action,
+            terminated=terminated,
         )
-        # 5 - episode termination flags (Gym style)
-        terminated = False # ended due to failure (off track)
-        truncated = False # Ended due to time limit
 
-        #If too far from the track centerline, and episode and punish strongly
-        if abs(lateral_error) > 3.0:
-            terminated = True
-            reward -= 20.0
-        #if we hit max steps, end due to time limit
-        if self.step_count >= self.max_steps:
-            truncated = True
+        # 5. Store current obs/action for next step's smoothness penalty.
+        self._prev_obs    = obs
+        self._prev_action = np.array(action, dtype=np.float32)
 
-        # Extra debug info (not usually used by the policy directly)
+        # 6. Extra debug info for logging / evaluation.
         info = {
-            "speed": v,
-            "heading_error": heading_error,
-            "lateral_error": lateral_error,
+            "speed":         obs[0] * 20.0,   # un-normalize back to m/s for readability
+            "heading_error": obs[1] * np.pi,  # un-normalize back to radians
+            "lateral_error": obs[2] * 3.0,    # un-normalize back to meters
         }
         return obs, reward, terminated, truncated, info
 

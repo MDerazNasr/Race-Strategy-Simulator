@@ -40,16 +40,41 @@ def load_bc_into_ppo(ppo_model, bc_path, device):
     # bc.net [Linear, ReLU, Linear, ReLU, Linear, Tanh]
     bc_layers = [m for m in bc.net if hasattr(m, "weight")]
 
-    # Map weights:
-    # bc_layers[0] -> policy_net[0]
-    # bc_layers[1] -> policy_net[2]
-    # bc_layers[2] -> action_net
+    # Map weights layer-by-layer:
+    #
+    #   BC structure (bc.net):
+    #     [0] Linear(6, 128)    ← hidden layer 1 weights
+    #     [1] ReLU
+    #     [2] Linear(128, 128)  ← hidden layer 2 weights
+    #     [3] ReLU
+    #     [4] Linear(128, 2)    ← output weights (throttle, steer)
+    #     [5] Tanh
+    #
+    #   SB3 PPO actor structure:
+    #     policy_net[0] = Linear(6, 128)    ← matches bc_layers[0]
+    #     policy_net[1] = ReLU
+    #     policy_net[2] = Linear(128, 128)  ← matches bc_layers[1]
+    #     policy_net[3] = ReLU
+    #     action_net    = Linear(128, 2)    ← matches bc_layers[2]
+    #
+    # NOTE: BC has Tanh on the output; SB3 applies tanh via its action distribution
+    # bijector (squashing the Gaussian sample). The linear weights transfer exactly.
     with torch.no_grad():
+        # Hidden layer 1
         policy_net[0].weight.copy_(bc_layers[0].weight)
         policy_net[0].bias.copy_(bc_layers[0].bias)
 
+        # Hidden layer 2
         policy_net[2].weight.copy_(bc_layers[1].weight)
         policy_net[2].bias.copy_(bc_layers[1].bias)
+
+        # Output layer — THIS WAS MISSING: without this, the action head is
+        # random despite the BC warm start. The agent had a good trunk but a
+        # random head, so it would produce completely wrong actions at startup.
+        action_net.weight.copy_(bc_layers[2].weight)
+        action_net.bias.copy_(bc_layers[2].bias)
+
+    print("[BC Init] Copied all 3 BC layers into PPO actor. Weight transfer complete.")
 
 
 def train():
