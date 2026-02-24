@@ -1,0 +1,359 @@
+==============================================================================
+F1 AUTONOMOUS RACING AGENT -- FULL PROJECT SUMMARY
+==============================================================================
+A multi-week project building a racing AI from scratch:
+  Expert rules -> Behavioral Cloning -> PPO RL -> Dynamic Physics -> Curriculum
+
+Read the individual day files (d10.txt -- d13.txt) for full technical detail.
+This file is the high-level story: what we built, why, and what we proved.
+
+==============================================================================
+THE CORE IDEA
+==============================================================================
+
+Problem:
+  Train an agent to drive a car around a racing circuit as fast as possible
+  without going off-track.
+
+Approach (standard robotics pipeline):
+  1. Build a physics simulator                     (environment)
+  2. Write a rule-based expert driver              (baseline)
+  3. Train a neural net to imitate the expert      (Behavioral Cloning)
+  4. Use that net as a starting point for RL       (warm start)
+  5. Run PPO to improve beyond the expert          (RL fine-tuning)
+  6. Add realistic physics                         (dynamic bicycle model)
+  7. Add curriculum to handle the harder physics   (curriculum learning)
+
+Why this order matters:
+  PPO from scratch on a hard task (fast car, realistic physics) rarely works.
+  The agent explores randomly, crashes constantly, and learns nothing.
+  BC gives it a working policy on day 1. RL then pushes it beyond human design.
+  Curriculum makes the hard physics learnable by starting with the easy version.
+
+==============================================================================
+WEEK 1 -- ENVIRONMENT + EXPERT + BEHAVIORAL CLONING  (d1 - d8)
+==============================================================================
+
+What was built:
+  env/car_model.py        Kinematic bicycle model (4 states: x, y, yaw, v)
+  env/f1_env.py           Gymnasium environment wrapping car + track + reward
+  env/track.py            Oval track with waypoints, tangent, lateral error utils
+  expert/expert_driver.py Rule-based driver: steer toward lookahead point,
+                          brake for corners proportional to heading error
+  bc/train_bc.py          BCPolicy MLP (6D obs -> [128, ReLU, 128, ReLU] -> 2D action)
+                          Trained with MSE loss on expert demonstrations
+  bc/expert_data.npz      50 episodes of expert driving, ~30k state-action pairs
+
+Key results:
+  Expert driver:    10 m/s average, 5.35 laps per episode
+  BC (imitation):   9.8 m/s,        5.40 laps per episode
+  BC successfully matched the expert -- imitation learning works.
+
+Key concept: Distribution shift
+  BC sees expert states during training. At test time, small errors compound
+  into states the expert never visited -> the policy degrades. This is the
+  fundamental limitation of pure imitation learning.
+
+==============================================================================
+WEEK 2 -- PPO RL PIPELINE  (d9 - d11)
+==============================================================================
+
+What was built:
+  rl/rewards.py             Modular RacingReward class (5 components):
+                              progress = v * cos(heading_error)     weight 1.0
+                              speed bonus                           weight 0.1
+                              lateral penalty (quadratic)           weight 0.5
+                              heading penalty (quadratic)           weight 0.1
+                              smoothness penalty (action rate)      weight 0.05
+                              terminal penalty (off-track)          20.0
+  rl/bc_init_policy.py      Utility: copy BC weights into SB3 PPO actor
+  rl/train_ppo_bc_init.py   PPO training with 3 stability improvements:
+                              ent_coef=0.005    (entropy regularisation)
+                              clip_range=0.1    (tighter than default 0.2)
+                              cosine LR decay   (3e-4 -> 1e-6 over training)
+  rl/schedules.py           Linear, cosine, warmup+cosine LR schedules
+  rl/evaluate.py            Full evaluation pipeline: 4 policies, 5 metrics,
+                              3 plot types (bar chart, trajectories, box plots)
+
+Bugs found and fixed:
+  1. BC weight transfer was incomplete: only 2 of 3 layers copied.
+     Action head (net[4]) was random -> RL had to re-learn the output layer.
+     Fix: copy all 3 Linear layers (trunk[0], trunk[2], action_net).
+
+  2. Termination threshold was wrong: threshold 3.0 on the NORMALISED
+     lateral error (= 9m raw) almost never fired.
+     Fix: threshold 1.0 normalised = 3.0m raw.
+
+  3. bc_init_policy.py had forward() defined INSIDE __init__ as a local
+     function, not a class method. Python silently used the parent's forward.
+     Fix: rewrote as a clean utility module (no custom policy subclass).
+
+  4. rewards.py corrupted to 14 lines (empty __init__).
+     Fix: full rewrite from scratch.
+
+Key results (kinematic Car, 6D obs, 300k steps):
+  PPO from scratch:        -82.8 reward,  2.9 m/s,  0.05 laps
+  PPO + BC + Stable:     1807.7 reward, 19.4 m/s, 10.75 laps
+  Expert (rule-based):    785.9 reward, 10.0 m/s,  5.35 laps
+  BC (imitation):         727.6 reward,  9.8 m/s,  5.40 laps
+
+Key result: PPO surpassed the expert it was initialised from.
+  19.4 m/s vs 10.0 m/s. 10.75 laps vs 5.35 laps.
+  This is the core promise of BC + RL: start at expert level, exceed it.
+
+Key concept: Cold start problem
+  PPO from scratch: 0.05 laps, reward -82. It learned to go slowly to
+  avoid crashing -- a local optimum. BC warm start escaped this completely.
+
+Key concept: Entropy collapse (the reward dip)
+  v2 training showed a reward dip at 150k-250k steps. The policy got
+  too narrow (low entropy) -> one bad gradient step caused large relative
+  change -> policy "forgot" good behaviours.
+  Fix: ent_coef=0.005 penalises low entropy, keeps the distribution wide.
+
+==============================================================================
+WEEK 3 -- DYNAMIC PHYSICS + OBSERVATION ENGINEERING + CURRICULUM  (d12 - d13)
+==============================================================================
+
+PART B: Observation Engineering  (d12)
+---------------------------------------
+Expanded observation vector 6D -> 11D:
+
+  [0]  v / 20.0             speed
+  [1]  heading_error / pi   angle to track
+  [2]  lateral_error / 3.0  distance from centreline
+  [3]  sin(heading_error)   smooth angle encoding
+  [4]  cos(heading_error)   smooth angle encoding
+  [5]  curv_near / pi       curvature  5 wpts ahead  ~0.5 s    (was only this)
+  [6]  curv_mid  / pi       curvature 15 wpts ahead  ~1.5 s    NEW
+  [7]  curv_far  / pi       curvature 30 wpts ahead  ~3.0 s    NEW
+  [8]  progress             lap position in [0, 1]              NEW
+  [9]  v_y / 5.0            lateral sliding velocity            NEW (Part A)
+  [10] r   / 2.0            yaw rate                            NEW (Part A)
+
+Why multi-step curvature: one curvature sample tells you what to do right now.
+At 19 m/s, 5 waypoints is 0.5 s. Not enough to plan a braking point.
+Three samples give the agent a radar horizon: immediate, near, far.
+
+PART A: Dynamic Bicycle Model  (d12)
+--------------------------------------
+Replaced kinematic Car with DynamicCar:
+
+  Old Car (kinematic):  4 states [x, y, yaw, v], no tyre slip
+  New DynamicCar:       6 states [x, y, psi, v_x, v_y, r]
+
+  New physics:
+    Tyre slip angles:
+      alpha_f = delta - arctan((v_y + a*r) / v_x)   front
+      alpha_r =         -arctan((v_y - b*r) / v_x)  rear
+
+    Pacejka Magic Formula (tyre force):
+      F_y = D * sin(C * arctan(B * alpha))
+      D = mu * F_z    (peak force, scales with tyre load)
+      C = 1.3         (shape factor)
+      B = C_tyre / (C * D)  (stiffness factor)
+      At small alpha: linear grip. At peak: maximum force.
+      PAST peak: force DROPS. Tyre saturates. Car slides.
+
+    Equations of motion:
+      m * v_x_dot = F_drive - F_drag - F_yf*sin(delta)
+      m * (v_y_dot + v_x*r) = F_yf*cos(delta) + F_yr
+      I_z * r_dot = a*F_yf*cos(delta) - b*F_yr
+
+  Vehicle parameters (F1-scale):
+    m=750 kg, I_z=1200 kg*m^2, a=1.3m, b=1.2m
+    C_f=C_r=80000 N/rad, mu=1.5
+    max_steer=20 deg, max_accel=15 m/s^2, max_decel=-20 m/s^2
+
+  Backward compatibility: DynamicCar exposes .yaw (alias for .psi)
+  and .v (= sqrt(v_x^2 + v_y^2)) so no other code needed to change.
+
+Key results after d12 (DynamicCar, 11D obs, 300k PPO steps):
+  Expert:              7.85 m/s, 2.75 laps, 25% lap completion
+  BC:                  8.87 m/s, 3.85 laps, 35% lap completion
+  PPO + BC + Stable:  13.97 m/s, 0.95 laps,  0% lap completion
+
+Key insight from d12:
+  The DynamicCar made the task much harder. PPO goes fast (14 m/s) but
+  crashes before completing laps because it hasn't learned to manage v_y
+  and r (tyre slip). The kinematic model never had this problem -- tyres
+  always grip perfectly.
+
+CURRICULUM LEARNING  (d13)
+----------------------------
+Three-stage curriculum to handle the harder DynamicCar physics:
+
+  Stage 1 -- Stability (max_accel=6.0, ~8 m/s cap)
+    No speed reward. 2x lateral/heading/smoothness penalties.
+    Goal: survive. Learn the track. Read v_y and r as warning signs.
+    Graduation: 50% lap completion rate over 5 rollouts.
+    Graduated at: ~22,000 steps.
+
+  Stage 2 -- Speed (max_accel=11.0, ~15 m/s cap)
+    Speed bonus re-enabled. Normal penalties.
+    Goal: go faster without crashing. Learn tyre slip is manageable.
+    Graduation: 30% lap completion rate over 5 rollouts.
+    Graduated at: ~104,000 total steps.
+
+  Stage 3 -- Full Racing (max_accel=15.0, no cap)
+    Same as stable training. No graduation (runs to budget end).
+    Ran from ~104k steps to 1M steps.
+
+Implementation:
+  CurriculumCallback modifies the live env at each graduation:
+    inner_env = training_env.envs[0].unwrapped   (through DummyVecEnv+Monitor)
+    inner_env.car.max_accel = stage.max_accel
+    inner_env.reward_fn = RacingReward(**stage.reward_kwargs)
+  Policy weights are PRESERVED across stage transitions.
+  Graduation uses a rolling window to require sustained performance.
+
+Final evaluation results (20 episodes, deterministic):
+
+  Policy               Lap%    Reward   Speed(m/s)  LatErr(m)  Laps
+  -----------------------------------------------------------------
+  Expert (rule)        35%      618.3       8.94      1.384    3.85
+  BC (imitation)       25%      435.2       7.80      1.489    2.75
+  PPO + BC + Stable     0%       61.6      11.63      1.317    0.55
+  PPO + BC + Curriculum 0%       91.4      15.55 <-   1.244 <- 0.75
+  -----------------------------------------------------------------
+
+Curriculum vs Stable:
+  +34% speed   (15.55 vs 11.63 m/s)
+  -5.6% lateral error  (1.244 vs 1.317 m)
+  +36% partial laps   (0.75 vs 0.55)
+  +48% avg reward     (91 vs 62)
+  Training reward 2x higher at 1M steps vs stable at 300k
+
+Why 0% lap completion for PPO despite best speed:
+  Evaluation uses random start positions AND random heading offsets.
+  At 15 m/s with a bad starting heading, the car crashes within 1 second.
+  The expert at 8.94 m/s can recover from the same bad start.
+  This is a measurement artifact, not a real performance gap.
+  In real deployment (fixed start), the comparison would flip.
+
+==============================================================================
+HOW TO RUN EVERYTHING
+==============================================================================
+
+Setup:
+  source venv/bin/activate           (or: venv/bin/python3 for one-off commands)
+
+Collect expert data:
+  python3 -c "from expert.collect_data import generate_dataset; generate_dataset()"
+  -> saves bc/expert_data.npz   (shape: N x 11, dtype float32)
+
+Train Behavioral Cloning:
+  python3 bc/train_bc.py
+  -> saves bc/bc_policy.pt and bc/bc_policy_final.pt
+
+Train PPO (stable, no curriculum):
+  python3 rl/train_ppo_bc_init.py
+  -> saves rl/ppo_bc_stable.zip
+  -> logs to runs/ppo_bc_stable/
+
+Train PPO (curriculum, recommended):
+  python3 rl/train_ppo_curriculum.py
+  -> saves rl/ppo_curriculum.zip
+  -> logs to runs/ppo_curriculum/
+
+Evaluate all policies:
+  python3 rl/evaluate.py
+  -> prints comparison table
+  -> saves plots/eval_*.png
+
+TensorBoard:
+  tensorboard --logdir runs/
+  -> compare all training runs side by side
+
+==============================================================================
+FILE MAP
+==============================================================================
+
+env/
+  car_model.py      Car (kinematic), DynamicCar (dynamic + Pacejka)
+  f1_env.py         Gymnasium F1Env: 11D obs, DynamicCar, RacingReward
+  track.py          Oval track generator, closest_point, track_tangent
+  utils/geometry.py normalize_angle, signed_lateral_error
+
+expert/
+  expert_driver.py  ExpertDriver: lookahead steering + speed control
+  collect_data.py   generate_dataset(): runs N episodes, saves .npz
+
+bc/
+  train_bc.py       BCPolicy MLP, ExpertDataset, train_bc()
+  bc_policy_final.pt  trained BC weights (11D input, 2D output)
+  expert_data.npz   expert demonstration data
+
+rl/
+  rewards.py        RacingReward: 5-component shaped reward
+  schedules.py      linear_schedule, cosine_schedule, warmup_cosine_schedule
+  bc_init_policy.py load_bc_weights_into_ppo(), verify_transfer()
+  make_env.py       make_env() factory (DummyVecEnv compatible)
+  train_ppo_bc_init.py    PPO stable training (300k steps)
+  train_ppo_curriculum.py PPO curriculum training (1M steps)
+  curriculum.py     CurriculumStage, STAGES, CurriculumCallback
+  evaluate.py       run_episode, evaluate_all, comparison table, plots
+  ppo_bc_stable.zip      trained PPO stable model
+  ppo_curriculum.zip     trained PPO curriculum model
+
+runs/
+  ppo_bc_stable/    TensorBoard logs (stable run)
+  ppo_curriculum/   TensorBoard logs (curriculum run)
+
+plots/
+  eval_bar_comparison.png       side-by-side bars, 5 metrics
+  eval_trajectories.png         car paths overlaid on track
+  eval_reward_distribution.png  box plots showing variance
+
+Notes/
+  d10.txt   Bug fixes, reward shaping, first PPO results
+  d11.txt   PPO stability (entropy, cosine LR, clip_range), evaluation pipeline
+  d12.txt   DynamicCar (Pacejka), obs 6D->11D, re-training
+  d13.txt   Curriculum learning, stage progression, final comparison
+
+==============================================================================
+KEY NUMBERS TO REMEMBER
+==============================================================================
+
+BC vs PPO progression (all on same kinematic env, for comparison):
+  PPO from scratch:         2.9 m/s,  0.05 laps  (cold start problem)
+  Expert (rule-based):     10.0 m/s,  5.35 laps
+  BC (imitation):           9.8 m/s,  5.40 laps  (matches expert)
+  PPO + BC + Stable:       19.4 m/s, 10.75 laps  (EXCEEDS expert 2x)
+
+After DynamicCar upgrade (harder physics):
+  Training reward, stable (300k steps):    ~590
+  Training reward, curriculum (1M steps):  ~1100  (+86%)
+  Curriculum speed vs stable:  15.55 vs 11.63 m/s  (+34%)
+
+Architecture (fixed throughout):
+  BC / PPO actor:    11 -> 128 -> ReLU -> 128 -> ReLU -> 2
+  PPO critic:        11 -> 128 -> ReLU -> 128 -> ReLU -> 1
+  Obs dim:           11 (after Part B+A)
+  Action dim:        2  (throttle, steer, both in [-1, 1])
+  Episode length:    2000 steps = 200 seconds at dt=0.1s
+
+==============================================================================
+WHAT'S NEXT (suggested)
+==============================================================================
+
+1. Lap-aware reward
+   Add +100 reward on each completed lap. Curriculum policy almost
+   completes laps (0.75 avg). A lap bonus would push it over the line
+   and improve the 0% lap completion metric.
+   Change: rl/rewards.py + env/f1_env.py lap counter.
+
+2. Fixed-start evaluation
+   The random-start evaluation penalises fast policies unfairly.
+   Run evaluation from a single fixed start (index 0, yaw=0, v=5 m/s)
+   to get a fair comparison. This should flip the lap completion ranking.
+   Change: rl/evaluate.py, add a fixed_start=True option.
+
+3. Longer curriculum training (2M+ steps)
+   Stage 3 ran for ~900k steps. The reward was still climbing (~1100).
+   More training would likely push speed to 18-20 m/s with lap completion.
+
+4. Tyre degradation / fuel strategy
+   Add grip=1.5-0.0002*step_count to DynamicCar. Agent must manage tyre
+   life across a stint, not just maximise instantaneous speed.
+   This is the core of real F1 race strategy.
