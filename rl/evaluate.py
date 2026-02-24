@@ -503,11 +503,27 @@ def evaluate_all(n_episodes: int = 20) -> List[PolicySummary]:
                 str(project_root / "rl" / "ppo_bc_stable.zip"), device
             ),
         },
+        {
+            "name":   "PPO + BC + Curriculum",
+            "color":  "#00C853",
+            # Only include if the file exists (may not have been trained yet)
+            "fn":     lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_curriculum.zip"), device
+            ),
+            "optional": True,   # skip gracefully if file not found
+        },
     ]
 
     summaries = []
 
     for cfg in configs:
+        # Optional policies (e.g. curriculum) are skipped if not yet trained
+        if cfg.get("optional"):
+            curriculum_path = project_root / "rl" / "ppo_curriculum.zip"
+            if not curriculum_path.exists():
+                print(f"\n  Skipping: {cfg['name']} (not yet trained)")
+                continue
+
         print(f"\n  Evaluating: {cfg['name']}")
         print(f"  {'─' * 40}")
 
