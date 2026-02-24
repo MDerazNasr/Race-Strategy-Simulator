@@ -331,6 +331,10 @@ class F1Env(gym.Env):
             # PART A: expose dynamic states for TensorBoard and evaluation
             "v_y":           obs[9]  * 5.0,   # lateral sliding speed (m/s)
             "yaw_rate":      obs[10] * 2.0,   # yaw rate (rad/s)
+            # Used by CurriculumCallback to distinguish crashes from lap completions.
+            # True  = episode ended because car went off-track (bad outcome).
+            # False = episode ended by reaching max_steps (survived = good outcome).
+            "crashed":       bool(terminated),
         }
         return obs, reward, terminated, truncated, info
 
