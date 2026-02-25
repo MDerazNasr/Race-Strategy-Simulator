@@ -1,0 +1,273 @@
+DAY 17 -- Tyre Degradation: Implementation + Obs Extension
+===========================================================
+Week 5 | F1 race strategy begins — grip decays, pace must be managed
+
+-----------------------------------------------------------------------
+SESSION GOAL
+-----------------------------------------------------------------------
+Add realistic tyre degradation to DynamicCar so that the agent must
+learn to manage grip across a stint, not just maximise instantaneous
+speed.  This is the central problem of real F1 race strategy:
+  - Push too hard → tyres die early → episode ends early → less reward
+  - Go too easy   → survive longer  → but lower per-step reward
+The agent must find the pace that maximises TOTAL episode reward.
+
+This is also the foundation for Week 5's next step: pit stops.
+Once the agent knows its tyres are degrading, it will need to decide
+WHEN to sacrifice lap time for fresh rubber.
+
+-----------------------------------------------------------------------
+WHY TYRE DEGRADATION?
+-----------------------------------------------------------------------
+All training up to d16 used mu = 1.5 forever.  Every lap was identical.
+The agent learned: "go as fast as possible."  That's not wrong — it just
+doesn't capture the real problem.
+
+In an F1 race, tyre degradation forces a strategic trade-off:
+  - Lap 1-5:   Tyres are fresh, maximum grip, can push hard.
+  - Lap 8-12:  Tyres are worn, mu drops, cornering becomes harder.
+  - Lap 14+:   Tyres are critically worn, the car slides continuously
+                and is likely to go off-track.
+
+The driver (or RL agent) must:
+  1. Know how worn the tyres are (from the tyre_life observation).
+  2. Modulate pace — more throttle/slip now means less grip later.
+  3. Eventually pit (d18) or manage to the end of the stint.
+
+This creates EMERGENT STRATEGY: the agent discovers conservative pacing
+on its own, from the reward signal alone.  We do not tell it "drive
+slower in corners when tyre_life < 0.5."  It discovers this.
+
+-----------------------------------------------------------------------
+FILES MODIFIED / CREATED
+-----------------------------------------------------------------------
+env/car_model.py       -- DynamicCar: tyre degradation physics.
+                          New params: base_wear=0.0003, slip_coef=0.002
+                          New attribute: tyre_life (starts 1.0)
+                          New attribute: mu_base (stores original mu)
+                          DynamicCar.step(): degrades mu after slip angles
+                          DynamicCar.reset_tyres(): restores tyre_life=1.0
+
+env/f1_env.py          -- Added tyre_degradation=False param to __init__().
+                          When True:
+                            - obs is 12D (appends tyre_life ∈ [0, 1])
+                            - observation_space is Box(12,)
+                            - reset() calls car.reset_tyres()
+                            - info includes "tyre_life" key
+                          When False: all existing behavior unchanged.
+
+rl/make_env.py         -- Added make_env_tyre() factory.
+                          Returns F1Env(tyre_degradation=True) in Monitor.
+
+rl/bc_init_policy.py   -- Added extend_obs_dim(model, old_dim, new_dim).
+                          Zero-pads first layer of both actor and critic
+                          from 11D to 12D.  Policy behavior is IDENTICAL
+                          to v2 on step 0 (new dim has zero weight).
+
+rl/train_ppo_tyre.py   -- New training script.
+                          Loads ppo_curriculum_v2.zip, extends 11→12D,
+                          runs 2M steps in tyre env, saves ppo_tyre.zip.
+
+-----------------------------------------------------------------------
+TYRE DEGRADATION MODEL
+-----------------------------------------------------------------------
+
+Physics (in DynamicCar.step(), after slip angle computation):
+
+  wear = base_wear + slip_coef * (|alpha_f| + |alpha_r|)
+  tyre_life = max(0.0, tyre_life - wear)
+  mu = mu_base * max(0.1, tyre_life)
+
+Parameters:
+  base_wear = 0.0003 per step   — rolling attrition (even in straight line)
+  slip_coef = 0.002 per rad     — extra wear from tyre sliding
+  mu_base   = 1.5               — original peak friction coefficient
+  mu floor  = mu_base * 0.1 = 0.15  — minimum grip (car still controllable)
+
+WHY SLIP-BASED WEAR?
+  Constant degradation would make all pace strategies equally costly.
+  Slip-based wear creates the real F1 physics:
+    - Going straight, barely sliding: near-zero extra wear
+    - Cornering with high slip angle: significant wear
+    - Aggressive oversteer: extreme wear
+
+  This means the AGENT'S CHOICES directly determine tyre life.
+  Conservative cornering → less slip → slower wear → longer stint.
+  Aggressive cornering  → more slip → faster wear → shorter stint.
+
+HOW QUICKLY TYRES WEAR:
+
+  Driving style     alpha_f+alpha_r  wear/step  worn at step  laps
+  ----------------------------------------------------------------
+  Very conservative   0.05 rad       0.000400     2500 steps   ~21
+  Normal (v2 style)   0.20 rad       0.000700     1429 steps   ~12
+  Aggressive          0.50 rad       0.001300      769 steps    ~6
+  ----------------------------------------------------------------
+  Episode cap: 2000 steps (200 seconds).  Normal driving wears out
+  BEFORE the episode ends — the physics forces a trade-off.
+
+WHAT MU DOES:
+  mu enters the Pacejka formula as the peak lateral force coefficient:
+    D = mu * F_z   (peak lateral force)
+  Lower mu → lower peak lateral force → less cornering grip.
+  At tyre_life = 0.5: mu = 0.75.  At 0.3: mu = 0.45.
+  Below ~0.3 tyre_life, the car can no longer hold corners at full speed.
+
+-----------------------------------------------------------------------
+OBSERVATION EXTENSION: 11D → 12D
+-----------------------------------------------------------------------
+
+Old obs (11D, d1-d16):
+  [0]  v / 20.0              speed
+  [1]  heading_error / π     track alignment
+  [2]  lateral_error / 3.0   distance from centreline
+  [3]  sin(heading_error)     smooth angle encoding
+  [4]  cos(heading_error)     smooth angle encoding
+  [5]  curv_near / π          curvature 5 wpts ahead
+  [6]  curv_mid  / π          curvature 15 wpts ahead
+  [7]  curv_far  / π          curvature 30 wpts ahead
+  [8]  progress               lap position [0, 1]
+  [9]  v_y / 5.0              lateral sliding velocity
+  [10] r   / 2.0              yaw rate
+
+New obs (12D, tyre env, d17+):
+  [0-10] same as above
+  [11] tyre_life ∈ [0, 1]    1.0 = new tyres, 0.0 = fully worn
+
+WHY INCLUDE TYRE_LIFE IN OBS?
+  Without it, the agent is blind to its tyre state.  It cannot develop
+  strategy because it cannot distinguish:
+    "I have 80% tyre left"  from  "I have 20% tyre left"
+
+  With tyre_life in obs, the network CAN learn conditional behavior:
+    if tyre_life > 0.7: push hard (safe, plenty of grip)
+    if tyre_life < 0.3: back off (grip nearly gone, crash imminent)
+
+  This information-theoretic change is necessary for any emergent
+  strategy to appear.
+
+-----------------------------------------------------------------------
+WEIGHT EXTENSION: HOW 11D → 12D IS HANDLED
+-----------------------------------------------------------------------
+
+Problem:
+  ppo_curriculum_v2 has actor/critic networks with input dim = 11.
+  The tyre env has obs dim = 12.  Direct loading fails (shape mismatch).
+
+Solution (extend_obs_dim in bc_init_policy.py):
+  1. Load v2 WITHOUT env (no shape check).
+  2. For actor trunk (mlp_extractor.policy_net[0]) and critic trunk
+     (mlp_extractor.value_net[0]):
+       old_weight: shape (128, 11)
+       new_weight: shape (128, 12), columns [:, :11] copied, [:, 11] = 0
+  3. Update in_features = 12 on both layers.
+  4. Update model.observation_space to Box(12,).
+  5. Call model.set_env(tyre_env) — now shapes match.
+
+Key property: zero-initialization of the new column.
+  The new tyre_life dimension has zero weight in both actor and critic
+  at the start of training.  This means:
+    - Policy's outputs at step 0 are IDENTICAL to v2's outputs.
+    - No sudden gradient spike from the new dimension.
+    - The network gradually LEARNS to use tyre_life through backprop.
+
+  This is the same technique used to extend vocabulary embeddings in
+  language models: add new rows/columns initialized to zero.  The model
+  retains all old knowledge; new knowledge is learned incrementally.
+
+Compare to d16 (catastrophic forgetting):
+  d16 failed because EPISODE TERMINATION changed (2000 → infinite).
+  The value function's calibration was completely wrong.
+  This run keeps termination UNCHANGED (still max_steps=2000).
+  Only the obs dim and tyre physics change — the value function's
+  horizon is still correct.  Risk of forgetting is minimal.
+
+-----------------------------------------------------------------------
+TRAINING DESIGN
+-----------------------------------------------------------------------
+
+Checkpoint:         ppo_curriculum_v2.zip (3M steps, 27 m/s, 100% lap%)
+Additional steps:   2M steps (total ~5M)
+Obs dim:            12D (11D + tyre_life)
+Tyre wear:          base=0.0003/step + 0.002×slip/step
+Episode length:     max_steps=2000 (unchanged from all previous training)
+LR:                 1e-4 → 1e-6 (cosine decay, same as d15)
+
+WHY 1e-4 (HIGHER THAN D16's 5e-5)?
+  d16 tried 5e-5 and still catastrophically forgot — but the root cause
+  was value distribution shift, NOT a high LR.  A lower LR would not
+  have saved d16.
+
+  Here, value distribution shift is not a risk (termination unchanged).
+  We use 1e-4 because we WANT the network to learn the tyre_life
+  dimension quickly.  Too low an LR would leave the new column at near-
+  zero for the entire 2M steps — the agent would never develop strategy.
+
+EXPECTED BEHAVIOR:
+  Early training (0-500k steps):
+    The tyre_life weight is near zero.  Policy looks like v2.
+    Episodes end earlier than v2 (tyres die) → ep_len_mean drops.
+    ep_rew_mean will drop from v2's 2250 as episodes get shorter.
+
+  Mid training (500k-1.5M):
+    The network begins to read tyre_life.  Policy gets slightly more
+    conservative in corners.  Episodes get longer again.
+    ep_rew_mean recovers toward v2 levels.
+
+  Late training (1.5M-2M):
+    Policy has learned to manage tyre degradation.  Episodes may
+    run longer than v2's 1010 steps if the agent drives conservatively
+    enough to keep tyres alive until episode truncation.
+    ep_rew_mean target: > 1500 (vs v2's 2250 with perfect tyres).
+
+-----------------------------------------------------------------------
+KEY ML CONCEPTS THIS SESSION
+-----------------------------------------------------------------------
+
+1. Input dimension extension via zero-padding
+   When a pre-trained network's input size grows, the principled
+   approach is to copy old weights and zero-initialise new columns.
+   The policy starts identical to the pre-trained version; new weights
+   grow from zero via backprop.  No forgetting of old knowledge.
+
+   Alternative: re-train from scratch (wasteful — 3M steps of driving
+   knowledge thrown away).
+
+2. Environment change classification
+   Not all env changes are equally dangerous for continued training.
+   Two categories:
+     SAFE:   Adding new obs dimensions (zero-padded), changing physics
+             parameters (drag, tyre slip).  Value function horizon
+             unchanged.  Low forgetting risk.
+     UNSAFE: Changing episode termination (truncated/terminated logic).
+             Value function calibration is immediately wrong.
+             High forgetting risk (d16).
+
+   Rule: if you must change termination, re-calibrate the critic first
+   (critic-only warm-up, or graduated changes).
+
+3. Emergent strategy via reward shaping through physics
+   We do NOT add an explicit tyre_life reward term.  The agent learns
+   to conserve tyres purely because:
+     - Low tyre_life → high slip → crashes → negative reward
+     - The agent observes tyre_life → can predict when to slow down
+     - Conserving tyres → longer episodes → more lap bonuses
+   The physics creates the incentive structure; the agent discovers it.
+
+   This is the cleaner approach vs hardcoded reward engineering.
+   The agent may discover strategies we didn't anticipate.
+
+-----------------------------------------------------------------------
+WHAT'S NEXT
+-----------------------------------------------------------------------
+After evaluating ppo_tyre, the natural next step is d18: pit stops.
+
+The agent currently has no way to escape worn tyres — it just degrades
+until it crashes.  Adding a pit action means:
+  - Agent gains 3rd action dimension: pit_signal ∈ [-1, 1]
+  - If pit_signal > 0: tyre reset (car.reset_tyres()), minus time penalty
+  - Action space: Box(3,) — requires new BC + new training from scratch
+  - The strategic question becomes WHEN to pit, not just how hard to push
+
+Alternatively: accept d17 as the tyre management result and move to
+load transfer under braking (more realistic vehicle dynamics).

@@ -418,7 +418,7 @@ def make_bc_policy(model_path: str, device: str) -> Callable:
     return policy_fn
 
 
-def make_ppo_policy(model_path: str, device: str) -> Callable:
+def make_ppo_policy(model_path: str, device: str, obs_dim: int = 11) -> Callable:
     """
     Load a trained SB3 PPO model and wrap it as a policy function.
 
@@ -439,6 +439,15 @@ def make_ppo_policy(model_path: str, device: str) -> Callable:
         handles vectorized vs non-vectorized environments, and returns
         a numpy array. model.policy(obs) returns raw tensor and requires
         manual handling. Always use model.predict() for inference.
+
+    Args:
+        model_path:  Path to the .zip model file.
+        device:      PyTorch device ('cpu' or 'cuda').
+        obs_dim:     Expected observation dimension.  Default 11 (all standard
+                     policies).  Use 12 for tyre-degradation policies, which
+                     were trained with the 12D tyre env (obs includes tyre_life).
+                     When obs_dim=12, evaluation must use a tyre env so that
+                     the obs vector matches what the policy expects.
     """
     model = PPO.load(model_path, device=device)
 
@@ -481,7 +490,11 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             In real racing, starts are never random — this is the fair benchmark.
     """
     device = "cpu"   # evaluation is fast enough on CPU
-    env = F1Env()    # single raw env (not vectorized — we need env.car access)
+    # Standard 11D env shared across all non-tyre policies.
+    env = F1Env()
+    # Tyre degradation env (12D obs) — created once and reused for tyre policies.
+    # Separate env needed because obs dim must match the policy's input layer.
+    env_tyre = F1Env(tyre_degradation=True)
 
     start_label = "FIXED START" if fixed_start else "RANDOM START"
     print("=" * 60)
@@ -544,6 +557,20 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional":      True,
             "optional_file": "ppo_multi_lap.zip",
         },
+        {
+            "name":          "PPO Tyre Degradation (5M+)",
+            "color":         "#00BFA5",
+            # Continued from ppo_curriculum_v2.zip with tyre degradation env.
+            # Obs extended 11D -> 12D (added tyre_life).  Episodes still
+            # truncate at max_steps=2000 (no multi_lap, avoids d16 mistake).
+            # Tyre wear: base=0.0003/step + 0.002×slip_angles/step.
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_tyre.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_tyre.zip",
+        },
     ]
 
     summaries = []
@@ -565,8 +592,12 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
 
         policy_fn = cfg["fn"]()   # build the policy function
 
+        # Tyre-degradation policies expect 12D obs — use the tyre env.
+        # All other policies use the standard 11D env.
+        eval_env = env_tyre if cfg.get("optional_file") == "ppo_tyre.zip" else env
+
         summary = run_episodes(
-            env=env,
+            env=eval_env,
             policy_fn=policy_fn,
             policy_name=cfg["name"],
             policy_color=cfg["color"],
