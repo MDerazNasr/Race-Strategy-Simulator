@@ -408,14 +408,92 @@ curriculum + 3M steps + lap bonus now wins decisively over the
 rule-based expert on every metric, in both evaluation modes.
 
 ==============================================================================
-WHAT'S NEXT (suggested)
+WEEK 4 (continued) -- MULTI-LAP TRAINING: IMPLEMENTATION + CATASTROPHIC
+FORGETTING  (d16)
 ==============================================================================
 
-1. Multi-lap training
-   Modify env to reset ONLY on crash (not on max_steps truncation).
-   Let the agent run indefinitely across laps in a single episode.
-   ep_rew_mean plateaued at ~2,250 with 2000-step cap. Removing the
-   cap would let the policy discover longer strategies.
+What was built:
+  env/f1_env.py          multi_lap=False parameter. When True: episodes only
+                         end on crash (no 2000-step truncation).
+  rl/make_env.py         make_env_multi_lap() factory: F1Env(multi_lap=True).
+  rl/train_ppo_multi_lap.py  Continues from ppo_curriculum_v2.zip with
+                             multi_lap env, LR 5e-5→1e-6, 2M more steps.
+
+Implementation (correct):
+  truncated = (not self.multi_lap) and (self.step_count >= self.max_steps)
+  When multi_lap=True: truncated always False. Episodes only end on crash.
+
+Training result: CATASTROPHIC FORGETTING (negative result, documented)
+
+  Start of run (~3M steps):  ep_rew_mean=2,250  ep_len_mean=1,010  (expected)
+  End of run (~5M steps):    ep_rew_mean=  -10  ep_len_mean=   93  (COLLAPSED)
+
+Root cause — VALUE FUNCTION DISTRIBUTION SHIFT:
+  The critic V(s) was calibrated for 2000-step-capped episodes.
+  In multi_lap mode, episodes can be infinite for good policies.
+  TD error = actual_return - V(s) ≈ 0 - 2000 = -2000 (huge negative).
+  These large gradients overwrote policy weights despite the low LR.
+  LR controls step size per gradient, not gradient magnitude.
+  Even 5e-5 LR × 1000x-larger gradient = still 10x-too-large update.
+
+Final evaluation results (all 6 policies):
+
+  RANDOM START (N=20):
+    Policy               Lap%   Reward  Speed(m/s)  LatErr(m)  Laps
+    -----------------------------------------------------------------
+    Expert (rule)        55%   1589.0    11.44      1.218     6.05
+    BC (imitation)       35%   1003.4     9.01      1.389     3.85
+    PPO + BC + Stable     0%     50.8     9.06      1.345     0.35
+    PPO + BC + Curriculum 0%    162.7    13.67      1.109     0.80
+    PPO v2 (3M)          65% <- 2840.2 <- 19.55 <-  1.044 <- 10.90 <-
+    PPO Multi-Lap (5M)    0%    -25.1     7.25      1.405     0.05  WORST
+
+  FIXED START (N=10):
+    Policy               Lap%   Reward  Speed(m/s)  LatErr(m)  Laps
+    -----------------------------------------------------------------
+    Expert (rule)       100% <- 2909.1    17.10      0.797    11.00
+    BC (imitation)      100%    2909.1    17.03      0.756 <- 11.00
+    PPO + BC + Stable     0%     135.1    24.60      0.874     0.00
+    PPO + BC + Curriculum 0%     258.9    25.00      0.981     1.00
+    PPO v2 (3M)         100%    4531.7 <- 26.92 <-   0.678 <- 17.00 <-
+    PPO Multi-Lap (5M)    0%     -10.2    14.49      1.256     0.00  WORST
+
+ppo_multi_lap is worse than BC, worse than expert, worse than PPO from
+scratch. It crashes in ~15 steps from a fixed start.
+ppo_curriculum_v2 remains the best model: 100% lap%, 26.92 m/s, 17 laps.
+
+Key ML concepts from this failure:
+  1. Value function distribution shift: change termination → critic wrong
+     → bad advantage estimates → bad policy gradient → collapse.
+  2. Catastrophic forgetting: no replay buffer in on-policy PPO.
+     Old good experience cannot anchor the policy. Weights are overwritten.
+  3. LR alone does not protect against large gradients.
+     The critical quantity is gradient * LR, not LR alone.
+  4. approx_kl as early warning: 0.0026 early in multi_lap (vs 0.001 in v2)
+     signalled the policy was changing too fast.
+  5. Keep failed checkpoints: ppo_multi_lap.zip is a reference negative
+     result, not dead weight.
+
+Options to fix multi-lap training correctly (next attempt):
+  A. Train from scratch with multi_lap=True from day 1.
+  B. Critic-only warm-up: freeze actor for 200k steps, let critic
+     re-calibrate to multi_lap returns, then unfreeze actor.
+  C. Graduated episode length: 2000→4000→8000→20000→multi_lap.
+     Value function adapts incrementally, no step-change to infinity.
+  D. Reset critic weights, keep actor weights. Critic re-learns from
+     scratch; actor kept by PPO clip mechanism.
+
+BEST MODEL STILL: ppo_curriculum_v2 (rl/ppo_curriculum_v2.zip)
+  Fixed start: 100% lap%, 26.92 m/s, 17 laps, 4532 reward.
+
+==============================================================================
+WHAT'S NEXT (suggested -- Week 5)
+==============================================================================
+
+1. Fix multi-lap training (optional)
+   Recommended approach: Option C (graduated episode length).
+   Add max_steps param to F1Env, run 200k-step phases at 2000→4000→8000→
+   20000→multi_lap. Cleanest path to sustained multi-lap driving.
 
 2. Load transfer under braking (vehicle dynamics)
    DynamicCar doesn't shift weight between axles when braking.
