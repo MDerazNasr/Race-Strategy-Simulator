@@ -176,6 +176,7 @@ def run_episode(
     env: F1Env,
     policy_fn: Callable,
     record_trajectory: bool = False,
+    fixed_start: bool = False,
 ) -> EpisodeResult:
     """
     Run ONE episode with a given policy and collect metrics.
@@ -199,20 +200,24 @@ def run_episode(
         EpisodeResult with all metrics for this single episode.
 
     HOW LAP COUNTING WORKS:
-        The track has 200 waypoints in a circle (indices 0–199).
-        `closest_point(track, x, y)` returns the nearest waypoint index.
+        Previously this function recomputed the track index every step using
+        closest_point() and detected wrap-around locally.  Now F1Env.step()
+        does this computation itself and stores the result in info["laps_completed"]
+        and env.laps_completed.  We read env.laps_completed at the end of the
+        episode — one source of truth, no duplicated logic.
 
-        A lap is detected when the track index WRAPS AROUND:
-        going from a high index (e.g. 190) back to a low index (e.g. 5).
-        We detect this as: new_idx < prev_idx - 100
-        (a jump of more than 100 indices backwards = wrapped around)
+    FIXED VS RANDOM START:
+        fixed_start=False (default): env.reset() picks a random track position,
+            random heading (±10°), and random speed (2–6 m/s).  This tests
+            robustness across all starting conditions.
 
-        This works because normal forward progress increases the index by
-        1–3 per step, not by 100+.
+        fixed_start=True: env.reset() places the car at waypoint 0, aligned
+            with the track, at 5 m/s.  All policies start identically — this
+            is the fair comparison that removes random-start bias against fast
+            policies.
     """
-    from env.track import closest_point
-
-    obs, info = env.reset()
+    reset_opts = {"fixed_start": True} if fixed_start else None
+    obs, info = env.reset(options=reset_opts)
 
     # Accumulate metrics across all steps in this episode
     total_reward = 0.0    # running sum of rewards — this is the key metric
@@ -220,10 +225,6 @@ def run_episode(
     lateral_errors = []
     trajectory_x = []
     trajectory_y = []
-
-    # For lap counting
-    prev_track_idx = 0
-    laps_completed = 0
 
     terminated = False
     truncated  = False
@@ -240,7 +241,8 @@ def run_episode(
         # ── Accumulate reward ──────────────────────────────────────────────
         # THIS is the running sum — total_reward is the sum of ALL step rewards.
         # Each step's reward is ~[-1, +1]. Over 2000 steps at full speed that
-        # can reach +2000. Over 100 steps crashing that's around -20 to -100.
+        # can reach +2000 (plus up to N × 100 lap bonuses).
+        # Over 100 steps crashing that's around -20 to -100.
         # This is the standard RL "return" (undiscounted for evaluation purposes).
         total_reward += reward
 
@@ -249,16 +251,6 @@ def run_episode(
         # because we updated f1_env.py to un-normalize them in the info dict.
         speeds.append(info["speed"])
         lateral_errors.append(abs(info["lateral_error"]))
-
-        # ── Lap counting ───────────────────────────────────────────────────
-        # Find current track index to detect wrap-around.
-        curr_idx, _ = closest_point(env.track, env.car.x, env.car.y)
-
-        # If index jumped backwards by more than half the track, we completed a lap.
-        # 200/2 = 100 is the threshold. Normal forward steps increase idx by 1-3.
-        if prev_track_idx > 150 and curr_idx < 50:
-            laps_completed += 1
-        prev_track_idx = curr_idx
 
         # ── Trajectory recording (optional) ───────────────────────────────
         if record_trajectory:
@@ -271,12 +263,12 @@ def run_episode(
 
     return EpisodeResult(
         steps=step + 1,
-        total_reward=total_reward,        # CORRECT: sum across all steps in episode
+        total_reward=total_reward,
         terminated=terminated,
         mean_speed_ms=float(np.mean(speeds)) if speeds else 0.0,
         mean_lateral_error_m=float(np.mean(lateral_errors)) if lateral_errors else 0.0,
         max_lateral_error_m=float(np.max(lateral_errors)) if lateral_errors else 0.0,
-        laps_completed=laps_completed,
+        laps_completed=env.laps_completed,   # read from env — single source of truth
         trajectory_x=trajectory_x,
         trajectory_y=trajectory_y,
     )
@@ -289,6 +281,7 @@ def run_episodes(
     policy_color: str,
     n_episodes: int = 20,
     record_one_trajectory: bool = True,
+    fixed_start: bool = False,
 ) -> PolicySummary:
     """
     Run N episodes and aggregate results into a PolicySummary.
@@ -314,7 +307,7 @@ def run_episodes(
     for ep in range(n_episodes):
         # Record trajectory on the last episode only (saves memory for N-1 episodes)
         record = record_one_trajectory and (ep == n_episodes - 1)
-        result = run_episode(env, policy_fn, record_trajectory=record)
+        result = run_episode(env, policy_fn, record_trajectory=record, fixed_start=fixed_start)
         results.append(result)
 
     # ── Aggregate across episodes ──────────────────────────────────────────
@@ -462,18 +455,37 @@ def make_ppo_policy(model_path: str, device: str) -> Callable:
 # MAIN EVALUATION ORCHESTRATOR
 # ─────────────────────────────────────────────────────────────────────────────
 
-def evaluate_all(n_episodes: int = 20) -> List[PolicySummary]:
+def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[PolicySummary]:
     """
-    Load all four policies and evaluate them head-to-head.
+    Load all policies and evaluate them head-to-head.
+
+    Args:
+        n_episodes:   Number of episodes to average over per policy.
+        fixed_start:  If True, all episodes start from the same position
+                      (waypoint 0, track-aligned, 5 m/s).  If False (default),
+                      each episode uses a random start position and heading.
 
     Returns a list of PolicySummary objects, one per policy.
-    The list is ordered: Expert, BC, PPO-Scratch, PPO-Stable.
+
+    WHY TWO EVALUATION MODES?
+        Random start (fixed_start=False):
+            Tests robustness — the policy must handle ANY starting condition.
+            This is the "hard" benchmark.  Fast policies (15 m/s) are
+            penalised: a large heading error at high speed → crash in < 1 s.
+            The slow expert (8 m/s) can recover from the same error → it scores
+            higher on lap-completion rate even though it drives slower.
+
+        Fixed start (fixed_start=True):
+            All policies begin at the same waypoint with zero perturbation.
+            This gives the cleanest comparison of pure driving ability.
+            In real racing, starts are never random — this is the fair benchmark.
     """
     device = "cpu"   # evaluation is fast enough on CPU
     env = F1Env()    # single raw env (not vectorized — we need env.car access)
 
+    start_label = "FIXED START" if fixed_start else "RANDOM START"
     print("=" * 60)
-    print("POLICY EVALUATION — Head-to-Head Comparison")
+    print(f"POLICY EVALUATION — {start_label}")
     print(f"  {n_episodes} episodes per policy, deterministic rollouts")
     print("=" * 60)
 
@@ -536,6 +548,7 @@ def evaluate_all(n_episodes: int = 20) -> List[PolicySummary]:
             policy_color=cfg["color"],
             n_episodes=n_episodes,
             record_one_trajectory=True,
+            fixed_start=fixed_start,
         )
         summaries.append(summary)
 
@@ -554,7 +567,7 @@ def evaluate_all(n_episodes: int = 20) -> List[PolicySummary]:
 # REPORTING — Terminal Table
 # ─────────────────────────────────────────────────────────────────────────────
 
-def print_comparison_table(summaries: List[PolicySummary]) -> None:
+def print_comparison_table(summaries: List[PolicySummary], title: str = "FINAL EVALUATION RESULTS") -> None:
     """
     Print a formatted ASCII comparison table to the terminal.
 
@@ -571,7 +584,7 @@ def print_comparison_table(summaries: List[PolicySummary]) -> None:
     """
     print("\n")
     print("═" * 88)
-    print("  FINAL EVALUATION RESULTS")
+    print(f"  {title}")
     print("═" * 88)
 
     # Column widths
@@ -631,7 +644,7 @@ def print_comparison_table(summaries: List[PolicySummary]) -> None:
 # REPORTING — Matplotlib Plots
 # ─────────────────────────────────────────────────────────────────────────────
 
-def plot_bar_comparison(summaries: List[PolicySummary], save_path: str) -> None:
+def plot_bar_comparison(summaries: List[PolicySummary], save_path: str, subtitle: str = "20 Episodes per Policy") -> None:
     """
     Generate a side-by-side bar chart comparing all 4 policies across 5 metrics.
 
@@ -732,7 +745,7 @@ def plot_bar_comparison(summaries: List[PolicySummary], save_path: str) -> None:
         )
 
     fig.suptitle(
-        "Head-to-Head Policy Evaluation  |  F1 Racing Env  |  20 Episodes per Policy",
+        f"Head-to-Head Policy Evaluation  |  F1 Racing Env  |  {subtitle}",
         fontsize=13, fontweight="bold", color="white", y=1.01
     )
 
@@ -914,28 +927,64 @@ def plot_episode_distributions(summaries: List[PolicySummary], save_path: str) -
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Run evaluation
-    summaries = evaluate_all(n_episodes=20)
+    # ── MODE 1: Random-start evaluation (N=20) ────────────────────────────────
+    # Every episode uses a random track position + random heading (±10°).
+    # This is the hard benchmark: tests policy robustness across all starts.
+    # Fast policies are penalised — high speed + bad heading → crash in < 1 s.
+    # This is the distribution used during TRAINING, so it reveals real-world
+    # robustness (or lack of it).
+    print("\n" + "═" * 70)
+    print("  EVALUATION MODE 1: RANDOM START  (N=20 episodes)")
+    print("  Tests robustness across all starting conditions.")
+    print("═" * 70)
+    summaries_random = evaluate_all(n_episodes=20, fixed_start=False)
+    print_comparison_table(summaries_random, title="RANDOM START — 20 Episodes per Policy")
 
-    # Print terminal table
-    print_comparison_table(summaries)
+    # ── MODE 2: Fixed-start evaluation (N=10) ────────────────────────────────
+    # All episodes start from waypoint 0, track-aligned, at 5 m/s.
+    # Every policy faces exactly the same starting condition.
+    # This removes the random-start penalty for fast policies and gives the
+    # fairest comparison of peak driving ability.
+    # In real F1, starts are never random — this is the operationally relevant
+    # benchmark.
+    print("\n" + "═" * 70)
+    print("  EVALUATION MODE 2: FIXED START  (N=10 episodes)")
+    print("  All policies start from waypoint 0, track-aligned, v=5 m/s.")
+    print("  Removes random-start bias against fast policies.")
+    print("═" * 70)
+    summaries_fixed = evaluate_all(n_episodes=10, fixed_start=True)
+    print_comparison_table(summaries_fixed, title="FIXED START — 10 Episodes per Policy")
 
-    # Generate all plots
-    env_for_plots = F1Env()   # fresh env just for trajectory plotting context
+    # ── Plots ─────────────────────────────────────────────────────────────────
+    env_for_plots = F1Env()
 
+    # Random-start plots (existing set — now includes lap bonus in rewards)
     plot_bar_comparison(
-        summaries,
+        summaries_random,
         save_path=str(project_root / "plots" / "eval_bar_comparison.png"),
+        subtitle="Random Start | 20 Episodes per Policy",
     )
     plot_trajectories(
-        summaries,
+        summaries_random,
         env=env_for_plots,
         save_path=str(project_root / "plots" / "eval_trajectories.png"),
     )
     plot_episode_distributions(
-        summaries,
+        summaries_random,
         save_path=str(project_root / "plots" / "eval_reward_distribution.png"),
     )
 
-    print("\n[Eval] All plots saved to plots/")
+    # Fixed-start bar chart — the fair comparison
+    # Saved separately so both views are preserved.
+    plot_bar_comparison(
+        summaries_fixed,
+        save_path=str(project_root / "plots" / "eval_bar_comparison_fixed.png"),
+        subtitle="Fixed Start | 10 Episodes per Policy",
+    )
+
+    print("\n[Eval] Plots saved:")
+    print("  plots/eval_bar_comparison.png          (random start)")
+    print("  plots/eval_bar_comparison_fixed.png    (fixed start — fair comparison)")
+    print("  plots/eval_trajectories.png")
+    print("  plots/eval_reward_distribution.png")
     print("[Eval] Done.")
