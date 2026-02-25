@@ -516,24 +516,39 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             ),
         },
         {
-            "name":   "PPO + BC + Curriculum",
-            "color":  "#00C853",
-            # Only include if the file exists (may not have been trained yet)
-            "fn":     lambda: make_ppo_policy(
+            "name":          "PPO + BC + Curriculum",
+            "color":         "#00C853",
+            "fn":            lambda: make_ppo_policy(
                 str(project_root / "rl" / "ppo_curriculum.zip"), device
             ),
-            "optional": True,   # skip gracefully if file not found
+            "optional":      True,
+            "optional_file": "ppo_curriculum.zip",
+        },
+        {
+            "name":   "PPO + Curriculum v2 (3M)",
+            "color":  "#FF6D00",
+            # Continued from ppo_curriculum.zip for 2M extra steps (train_ppo_continue.py).
+            # Only shown if the file exists.
+            "fn":     lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_curriculum_v2.zip"), device
+            ),
+            "optional": True,
+            "optional_file": "ppo_curriculum_v2.zip",
         },
     ]
 
     summaries = []
 
     for cfg in configs:
-        # Optional policies (e.g. curriculum) are skipped if not yet trained
+        # Optional policies are skipped if their .zip file doesn't exist yet.
+        # Each optional config specifies its own file via "optional_file".
+        # Falls back to deriving the filename from the lambda (not always possible),
+        # so we require explicit "optional_file" for any optional policy.
         if cfg.get("optional"):
-            curriculum_path = project_root / "rl" / "ppo_curriculum.zip"
-            if not curriculum_path.exists():
-                print(f"\n  Skipping: {cfg['name']} (not yet trained)")
+            opt_file = cfg.get("optional_file", "ppo_curriculum.zip")
+            model_path = project_root / "rl" / opt_file
+            if not model_path.exists():
+                print(f"\n  Skipping: {cfg['name']} (not yet trained — {opt_file})")
                 continue
 
         print(f"\n  Evaluating: {cfg['name']}")
