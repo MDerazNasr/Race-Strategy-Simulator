@@ -29,10 +29,32 @@ from rl.rewards import RacingReward
 class F1Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30} #info used for rendering
 
-    def __init__(self, render_mode=None, dt= 0.1):
+    def __init__(self, render_mode=None, dt=0.1, multi_lap=False):
         super().__init__()
         self.dt = dt #dt = how much simulated time passes each step(). Same as in Car
         self.render_mode = render_mode #render_mode = you'll use this later if you draw stuff
+
+        # ── Multi-lap mode ────────────────────────────────────────────────────
+        # When False (default): episodes end after max_steps steps OR on crash.
+        #   This is the standard training mode used in d1–d15.
+        #
+        # When True: episodes ONLY end on crash (terminated=True).
+        #   truncated is never set. The agent runs indefinitely until it goes
+        #   off-track.
+        #
+        # WHY MULTI-LAP?
+        #   With max_steps=2000, good policies are TRUNCATED right as they
+        #   hit peak performance. The agent never sees "what happens on lap 7."
+        #   Training reward plateaued at ~2,250 with the 2000-step cap —
+        #   a clear signal the cap was the bottleneck, not the policy.
+        #
+        #   Removing the cap means:
+        #     - Episodes last as long as the agent survives (can be 5,000+ steps)
+        #     - The agent trains on the full distribution of lap states
+        #     - The lap bonus (+100 per lap) accumulates — longer survival = more
+        #       reward — creating a strong gradient toward sustained safe racing
+        #     - The value function learns to estimate multi-lap returns
+        self.multi_lap = multi_lap
 
         #Track
         self.track = generate_oval_track() #you generate a simple circular-ish track (list of (x,y) points)
@@ -376,7 +398,10 @@ class F1Env(gym.Env):
         # (Previous bug: threshold was 3.0 on the normalized value = 9m raw,
         #  which almost never fired and broke the terminal learning signal.)
         terminated = abs(lateral_error) > 1.0   # 1.0 normalized = 3.0 m raw
-        truncated  = self.step_count >= self.max_steps
+
+        # In multi_lap mode, episodes never truncate — only crashes end them.
+        # In standard mode, episodes also end at max_steps (2000 steps = 200 s).
+        truncated  = (not self.multi_lap) and (self.step_count >= self.max_steps)
 
         # 4. Compute shaped reward via the modular RacingReward class.
         #    All reward math and hyperparameters live in rl/rewards.py.

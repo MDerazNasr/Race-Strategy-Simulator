@@ -1,0 +1,298 @@
+DAY 16 -- Multi-Lap Training: Implementation + Catastrophic Forgetting
+======================================================================
+Week 4 | Removing the 2000-step episode cap — and what went wrong
+
+-----------------------------------------------------------------------
+SESSION GOAL
+-----------------------------------------------------------------------
+Remove the 2000-step truncation from F1Env so episodes only end on crash.
+This should let the agent train on sustained multi-lap driving instead of
+being artificially cut off after 200 seconds.
+
+Result: the implementation is correct, but naive continuation from a
+truncated-training checkpoint caused catastrophic forgetting. The policy
+went from the best model in the project (27 m/s, 100% lap completion)
+to the worst (7 m/s, 0% lap completion, avg episode 92 steps).
+
+This is one of the most important failure modes in RL. Documented in full.
+
+-----------------------------------------------------------------------
+FILES CREATED / MODIFIED
+-----------------------------------------------------------------------
+env/f1_env.py          -- Added multi_lap=False parameter to __init__().
+                          When True: truncated = False always.
+                          When False: existing behavior (truncate at max_steps).
+
+rl/make_env.py         -- Added make_env_multi_lap() factory function.
+                          Returns F1Env(multi_lap=True) wrapped in Monitor.
+
+rl/train_ppo_multi_lap.py -- New training script. Loads ppo_curriculum_v2.zip,
+                             uses make_env_multi_lap, runs 2M more steps.
+
+rl/evaluate.py         -- Added PPO Multi-Lap (3M+) as an optional entry.
+
+New artifacts:
+  rl/ppo_multi_lap.zip           (collapsed policy — kept for reference)
+  runs/ppo_multi_lap/            (TensorBoard logs showing the collapse)
+  plots/eval_bar_comparison.png  (updated with 6 policies)
+  plots/eval_bar_comparison_fixed.png (updated)
+
+-----------------------------------------------------------------------
+IMPLEMENTATION (CORRECT)
+-----------------------------------------------------------------------
+
+env/f1_env.py change:
+  __init__(self, ..., multi_lap=False):
+      self.multi_lap = multi_lap
+
+  step():
+      terminated = abs(lateral_error) > 1.0
+      truncated  = (not self.multi_lap) and (self.step_count >= self.max_steps)
+
+  When multi_lap=True: truncated is always False. Episodes only end on crash.
+  When multi_lap=False: existing behavior is unchanged.
+
+make_env.py change:
+  def make_env_multi_lap():
+      env = F1Env(multi_lap=True)
+      env = Monitor(env)
+      return env
+
+Both changes are correct. The issue was NOT in the implementation.
+
+-----------------------------------------------------------------------
+TRAINING DESIGN
+-----------------------------------------------------------------------
+
+Checkpoint:  ppo_curriculum_v2.zip (3M steps, 27 m/s, 100% lap completion)
+Additional:  2M steps (total ~5M)
+LR:          5e-5 → 1e-6 (cosine, even lower than v2's 1e-4)
+Env:         F1Env(multi_lap=True) — no episode length cap
+
+-----------------------------------------------------------------------
+TRAINING RESULTS (WHAT ACTUALLY HAPPENED)
+-----------------------------------------------------------------------
+
+Start of run (~3M steps):
+  ep_rew_mean:  2,250   (same as v2 end — expected)
+  ep_len_mean:  1,010   (same as v2 end — expected)
+
+End of run (~5M steps):
+  ep_rew_mean:  -10.6   (COLLAPSED)
+  ep_len_mean:  92.5    (COLLAPSED — from 1010 to 92 steps)
+  std (policy): 0.103   (fell from 0.123 — policy got more deterministic)
+  entropy_loss: 2.08    (rose from 1.65 — policy became more random)
+
+The policy did not improve. It catastrophically regressed.
+
+-----------------------------------------------------------------------
+EVALUATION RESULTS
+-----------------------------------------------------------------------
+
+RANDOM START (N=20):
+  Policy               Lap%   Reward  Speed(m/s)  LatErr(m)  Laps
+  -----------------------------------------------------------------
+  Expert (rule)        55%   1589.0    11.44      1.218     6.05
+  BC (imitation)       35%   1003.4     9.01      1.389     3.85
+  PPO + BC + Stable     0%     50.8     9.06      1.345     0.35
+  PPO + BC + Curriculum 0%    162.7    13.67      1.109     0.80
+  PPO v2 (3M)          65% <- 2840.2 <- 19.55 <-  1.044 <- 10.90 <-
+  PPO Multi-Lap (5M)    0%    -25.1     7.25      1.405     0.05  <-- WORST
+  -----------------------------------------------------------------
+
+FIXED START (N=10):
+  Policy               Lap%   Reward  Speed(m/s)  LatErr(m)  Laps
+  -----------------------------------------------------------------
+  Expert (rule)       100% <- 2909.1    17.10      0.797    11.00
+  BC (imitation)      100%    2909.1    17.03      0.756 <- 11.00
+  PPO + BC + Stable     0%     135.1    24.60      0.874     0.00
+  PPO + BC + Curriculum 0%     258.9    25.00      0.981     1.00
+  PPO v2 (3M)         100%    4531.7 <- 26.92 <-   0.678 <- 17.00 <-
+  PPO Multi-Lap (5M)    0%     -10.2    14.49      1.256     0.00  <-- WORST
+  -----------------------------------------------------------------
+
+ppo_multi_lap is now the worst policy in the entire project — worse than
+BC from d8, worse than expert, worse than PPO from scratch. Starting from a
+fixed clean position it crashes in 15 steps.
+
+ppo_curriculum_v2 remains the best model. Multi-lap training made things
+dramatically worse.
+
+-----------------------------------------------------------------------
+ROOT CAUSE ANALYSIS: CATASTROPHIC FORGETTING
+-----------------------------------------------------------------------
+
+WHY DID THE POLICY COLLAPSE?
+
+The core problem: VALUE FUNCTION DISTRIBUTION SHIFT.
+
+With max_steps=2000 (all training up to v2):
+  A good episode = 2000 steps = truncated = +~2250 reward
+  A bad episode  = ~100 steps = terminated = ~-20 reward
+  The value function V(s) learned: "from a typical state, expect ~1000-2000 reward"
+
+With multi_lap=True (this run):
+  A good episode = INFINITE steps (as long as it survives)
+  A bad episode  = ~50 steps = terminated = ~-20 reward
+  The correct V(s) is now unbounded: "if I never crash, return = ∞"
+
+The value function from v2 is completely wrong for the multi_lap regime.
+It was calibrated to predict returns over 2000-step windows. Now it's
+asked to predict returns over infinite windows.
+
+WHAT HAPPENS MECHANICALLY:
+  1. At the start of multi_lap training, V(s) predicts ~1000-2000 (v2 calibration)
+  2. In multi_lap mode with random starts, many episodes crash quickly → actual return ~0-50
+  3. The TD error (target - prediction) is HUGE and NEGATIVE: ~0 - 2000 = -2000
+  4. The critic gradient is enormous — it tries to correct a 2000-unit error fast
+  5. The actor gradient (policy gradient loss) also becomes large as the advantage
+     estimates are completely wrong (advantage = return - V(s) ≈ 0 - 2000 = -2000)
+  6. These large gradients OVERWRITE the policy weights despite the low LR (5e-5)
+  7. The policy "forgets" it ever knew how to race
+
+WHY DIDN'T THE LOW LR SAVE IT?
+  LR controls the step size PER GRADIENT. If the gradient is 1000x larger
+  than normal, even a 10x lower LR doesn't compensate. The key quantity is
+  gradient * LR, not LR alone.
+
+  The approx_kl was high early in training (0.0026 at step 2), confirming
+  the policy was changing faster than intended despite low LR.
+
+WHY IS THIS CALLED "CATASTROPHIC FORGETTING"?
+  The agent had learned a complex, well-calibrated policy for the truncated
+  env. The new value estimation wiped out that calibration in a few rollouts.
+  Neural networks don't have "stable" memories — once overwritten by gradients,
+  the information is gone.
+
+  This is the same phenomenon seen when you fine-tune a language model on
+  a new task and it "forgets" its general knowledge. Same root cause: large
+  gradient updates targeted at the new task overwrite weights that stored
+  old task knowledge.
+
+-----------------------------------------------------------------------
+HOW TO DO MULTI-LAP TRAINING CORRECTLY (NEXT TIME)
+-----------------------------------------------------------------------
+
+Option 1 — Train from scratch with multi_lap from the start
+  The cleanest solution. Run the full BC → curriculum pipeline with
+  multi_lap=True from day 1. The value function will learn multi_lap
+  returns from scratch and never develop the wrong calibration.
+  Cost: re-runs Stages 1+2 (~100k steps wasted).
+
+Option 2 — Critic-only warm-up period
+  Freeze the ACTOR (policy network) for the first 200k steps.
+  Let only the CRITIC update to re-calibrate to multi_lap returns.
+  Once V(s) is calibrated, unfreeze the actor.
+
+  SB3 implementation:
+    for param in model.policy.mlp_extractor.policy_net.parameters():
+        param.requires_grad = False
+    # run 200k steps
+    for param in model.policy.mlp_extractor.policy_net.parameters():
+        param.requires_grad = True
+    # run remaining steps
+
+  This prevents the bad advantage estimates from corrupting the policy
+  while the critic re-calibrates.
+
+Option 3 — Graduated episode length cap
+  Instead of going from max_steps=2000 directly to multi_lap=True,
+  gradually increase the cap:
+    Phase 1: max_steps=2000  (current training)
+    Phase 2: max_steps=4000  (200k steps)
+    Phase 3: max_steps=8000  (200k steps)
+    Phase 4: max_steps=20000 (200k steps)
+    Phase 5: multi_lap=True  (final)
+
+  Each phase doubles the horizon. The value function adapts incrementally
+  rather than facing a step-change from 2000 to infinity.
+  This is the most principled approach and mirrors curriculum learning.
+
+Option 4 — Reset critic weights, keep actor weights
+  Re-initialize the critic (value function) to random weights.
+  The actor (policy) keeps its trained weights.
+  Then run training: actor stays good (clips prevent large changes),
+  critic re-learns from scratch to match multi_lap returns.
+
+  Risk: without accurate critic, the actor's policy gradient is noisy.
+  Advantage: actor weights are guaranteed not to be corrupted by bad
+  value estimates.
+
+-----------------------------------------------------------------------
+KEY ML CONCEPTS LEARNED THIS SESSION
+-----------------------------------------------------------------------
+
+1. Value function distribution shift (the core failure mode here)
+   PPO's critic learns V(s) calibrated to the CURRENT episode length.
+   If you change episode termination conditions, V(s) is immediately wrong.
+   Wrong V(s) → wrong advantage estimates → wrong policy gradient → collapse.
+   Solution: always re-calibrate the critic before updating the actor when
+   changing termination conditions.
+
+2. Catastrophic forgetting in on-policy RL
+   PPO uses ONLY current-policy rollouts. There is no replay buffer with
+   old good experiences to anchor the policy. When gradient updates go wrong,
+   there is nothing to pull the policy back.
+   Contrast with off-policy methods (SAC, DQN): old experience in the replay
+   buffer acts as a regularizer, slowing forgetting.
+
+3. The "gradient * LR" vs "LR alone" distinction
+   LR controls step size per unit gradient.
+   If the gradient is 100x larger than normal (from wrong value estimates),
+   even 10x lower LR only gives you 10x smaller steps: still 10x too large.
+   When changing environments, control the gradient magnitude DIRECTLY
+   (e.g., by fixing the critic, or using gradient clipping) rather than
+   relying on LR alone.
+
+4. approx_kl as an early warning signal
+   SB3 logs approx_kl: the KL divergence between old and new policy.
+   In v2 training, approx_kl was ~0.001 (small, stable).
+   In multi_lap training early steps, approx_kl was 0.0026 (2.5x higher).
+   A sustained high approx_kl early in continued training is a warning
+   that the policy is changing too fast — the environment distribution has
+   shifted significantly from the training distribution.
+
+5. Keeping failed checkpoints
+   ppo_multi_lap.zip is a "negative result" but still valuable:
+     - Shows exactly what catastrophic forgetting looks like numerically
+     - Provides a baseline for Option 2-4 experiments to beat
+     - Documents that naive continuation across termination changes doesn't work
+   Never delete failed checkpoints from a research project.
+
+-----------------------------------------------------------------------
+WHAT'S NEXT
+-----------------------------------------------------------------------
+
+The multi_lap implementation (env/f1_env.py + make_env.py) is correct
+and ready to use. The failure was in the continuation strategy.
+
+Recommended next approach:
+  Option 3 (graduated episode length) is the cleanest path:
+  Run train_ppo_continue.py (from ppo_curriculum_v2) with increasing
+  max_steps rather than jumping directly to multi_lap=True.
+  Implement by adding a max_steps parameter to F1Env and modifying
+  make_env to accept it.
+
+OR: accept v2 as the final model and move to Week 5 (tyre degradation).
+  ppo_curriculum_v2 already achieves 100% lap completion at 27 m/s.
+  The multi_lap improvement would be marginal given it requires a
+  full restart of Stage 3 training.
+
+-----------------------------------------------------------------------
+WEEK 4 SUMMARY
+-----------------------------------------------------------------------
+COMPLETED:
+  <- d14: Lap-aware reward (+100/lap)
+  <- d14: Fixed-start evaluation (removes random-start bias)
+  <- d15: Continued training to 3M steps (ppo_curriculum_v2)
+          PPO now beats expert on all metrics: 27 m/s, 17 laps, 100% lap%
+  <- d16: Multi-lap env implementation (F1Env multi_lap=False/True)
+  <- d16: Catastrophic forgetting documented — critical RL failure mode
+
+NEGATIVE RESULT (equally valuable):
+  -> Naive continuation from truncated checkpoint into multi_lap env = collapse
+  -> Root cause: value function distribution shift
+  -> Fix: critic-only warm-up OR graduated episode length OR train from scratch
+
+BEST MODEL STILL: ppo_curriculum_v2 (rl/ppo_curriculum_v2.zip)
+  Fixed start: 100% lap%, 26.92 m/s, 17 laps, 4532 reward

@@ -525,15 +525,24 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_curriculum.zip",
         },
         {
-            "name":   "PPO + Curriculum v2 (3M)",
-            "color":  "#FF6D00",
-            # Continued from ppo_curriculum.zip for 2M extra steps (train_ppo_continue.py).
-            # Only shown if the file exists.
-            "fn":     lambda: make_ppo_policy(
+            "name":          "PPO + Curriculum v2 (3M)",
+            "color":         "#FF6D00",
+            "fn":            lambda: make_ppo_policy(
                 str(project_root / "rl" / "ppo_curriculum_v2.zip"), device
             ),
-            "optional": True,
+            "optional":      True,
             "optional_file": "ppo_curriculum_v2.zip",
+        },
+        {
+            "name":          "PPO Multi-Lap (3M+)",
+            "color":         "#E040FB",
+            # Continued from ppo_curriculum_v2.zip with multi_lap env.
+            # Episodes only end on crash — no 2000-step truncation.
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_multi_lap.zip"), device
+            ),
+            "optional":      True,
+            "optional_file": "ppo_multi_lap.zip",
         },
     ]
 
