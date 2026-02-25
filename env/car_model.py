@@ -254,6 +254,38 @@ class DynamicCar:
         max_accel: float = 15.0,    # max longitudinal acceleration (m/s²) — F1 ≈ 15 m/s²
         max_decel: float = -20.0,   # max braking deceleration  (m/s²) — F1 ≈ -20 m/s²
         drag_coeff: float = 0.02,   # aero drag coefficient (lower than kinematic — less damping)
+        # ── Tyre degradation parameters (Week 5) ──────────────────────
+        # Controls how fast the tyre loses grip over the course of a stint.
+        #
+        # DEGRADATION MODEL:
+        #   Every step:
+        #     wear = base_wear + slip_coef * (|alpha_f| + |alpha_r|)
+        #     tyre_life -= wear
+        #     mu = mu_base * max(0.1, tyre_life)
+        #
+        # base_wear:  constant attrition each step (rubber laid down just from
+        #             rolling, even in a straight line).  0.0003/step →
+        #             tyres worn completely in 3333 steps (~333 s) if you never slide.
+        #
+        # slip_coef:  extra wear proportional to tyre slip angle.  Sliding
+        #             generates more heat and abrasion than clean rolling.
+        #             0.002 × 0.2 rad ≈ 0.0004/step additional at normal cornering.
+        #
+        # Combined (normal driving, α≈0.2 rad):
+        #   0.0003 + 0.002×0.2 = 0.0007/step → tyres dead at ~1428 steps (~12 laps).
+        #
+        # Combined (aggressive driving, α≈0.5 rad):
+        #   0.0003 + 0.002×0.5 = 0.0013/step → tyres dead at ~769 steps (~6 laps).
+        #
+        # This creates a real trade-off: pushing hard is faster per lap but
+        # shortens the stint dramatically.  The agent must learn to manage
+        # this trade-off to maximise total episode reward.
+        base_wear: float = 0.0,     # minimum wear per step (rolling attrition)
+                                    # DEFAULT 0.0 = no degradation (backward compatible).
+                                    # F1Env(tyre_degradation=True) sets this to 0.0003.
+        slip_coef: float = 0.0,     # additional wear per rad of tyre slip per step
+                                    # DEFAULT 0.0 = no degradation (backward compatible).
+                                    # F1Env(tyre_degradation=True) sets this to 0.002.
     ):
         # ── Initial state ──────────────────────────────────────────────
         self.x   = x
@@ -270,11 +302,17 @@ class DynamicCar:
         self.b         = b           # rear  axle distance from CoM
         self.C_f       = C_f
         self.C_r       = C_r
-        self.mu        = mu
+        self.mu_base   = mu          # store original grip for reset_tyres()
+        self.mu        = mu          # current effective friction (degrades over time)
         self.max_steer = max_steer
         self.max_accel = max_accel
         self.max_decel = max_decel
         self.drag_coeff = drag_coeff
+
+        # ── Tyre degradation state ─────────────────────────────────────
+        self.tyre_life  = 1.0        # 1.0 = new, 0.0 = fully worn
+        self.base_wear  = base_wear
+        self.slip_coef  = slip_coef
 
     # ── Backward-compatible aliases ────────────────────────────────────
     @property
@@ -317,6 +355,11 @@ class DynamicCar:
         After reset:
           v_y = 0.0  (car is not sliding sideways at the start)
           r   = 0.0  (car is not spinning at the start)
+
+        NOTE: reset() does NOT reset tyre_life.  That is the job of
+        reset_tyres(), which F1Env calls explicitly when tyre_degradation=True.
+        This separation allows future pit-stop logic to reset tyres mid-episode
+        without restarting the whole car state.
         """
         self.x   = x
         self.y   = y
@@ -324,6 +367,21 @@ class DynamicCar:
         self.v_x = v_x if v_x is not None else (v   if v   is not None else 0.0)
         self.v_y = 0.0   # always zero lateral velocity at start of episode
         self.r   = 0.0   # always zero yaw rate at start of episode
+
+    def reset_tyres(self):
+        """
+        Restore tyres to factory-fresh condition.
+
+        Called by F1Env.reset() at the start of each episode (when
+        tyre_degradation=True) and will be called by pit-stop logic in d18+.
+
+        Resets both tyre_life (the state variable) and mu (the physics
+        parameter derived from tyre_life).  Keeping them in sync here means
+        the rest of the code only needs to call reset_tyres() — it never
+        has to manually set self.mu back.
+        """
+        self.tyre_life = 1.0
+        self.mu        = self.mu_base
 
     # ── Pacejka "Magic Formula" tyre model ────────────────────────────
     def _pacejka_lateral_force(self, alpha: float, F_z: float, C_tyre: float) -> float:
@@ -447,7 +505,22 @@ class DynamicCar:
         # Rear slip: there is no steering at the rear, only body/yaw motion
         alpha_r = -np.arctan2(self.v_y - self.b * self.r, v_x_safe)
 
-        # ── 5. Pacejka lateral tyre forces ─────────────────────────────
+        # ── 5. Tyre degradation (Week 5) ───────────────────────────────
+        # Wear = base rolling attrition + extra wear from tyre slip.
+        # The slip angles (alpha_f, alpha_r) are already computed above.
+        # Larger slip → more heat → more wear.  This is what creates the
+        # speed/longevity trade-off that is central to real F1 strategy:
+        # pushing hard is faster NOW but destroys the tyres SOONER.
+        #
+        # mu is capped at 10% of mu_base even when tyre_life = 0 —
+        # the car stays controllable (barely) rather than instantly crashing.
+        # This gives the agent a few steps to correct before going off-track,
+        # which is more realistic than instantaneous grip = 0.
+        wear = self.base_wear + self.slip_coef * (abs(alpha_f) + abs(alpha_r))
+        self.tyre_life = max(0.0, self.tyre_life - wear)
+        self.mu = self.mu_base * max(0.1, self.tyre_life)
+
+        # ── 6. Pacejka lateral tyre forces ─────────────────────────────
         F_yf = self._pacejka_lateral_force(alpha_f, F_zf, self.C_f)
         F_yr = self._pacejka_lateral_force(alpha_r, F_zr, self.C_r)
 

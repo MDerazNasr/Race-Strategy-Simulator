@@ -156,6 +156,93 @@ def load_bc_weights_into_ppo(ppo_model, bc_path: str, device: str) -> None:
     )
 
 
+def extend_obs_dim(model, old_dim: int, new_dim: int) -> None:
+    """
+    Extend an SB3 PPO model's input from old_dim to new_dim observations
+    by zero-padding the new input weight columns.
+
+    WHY THIS IS NEEDED (Week 5 — tyre degradation):
+    ================================================
+    All previous policies (v2, multi_lap, etc.) were trained with an 11D
+    observation vector.  The tyre degradation env adds a 12th dimension
+    (tyre_life).  We cannot directly load a 11D-input policy into a 12D env
+    because the first Linear layer's weight matrix has the wrong shape:
+
+        Old:  Linear(11, 128) → weight shape (128, 11)
+        New:  Linear(12, 128) → weight shape (128, 12)
+
+    SB3's PPO.load() would raise a shape mismatch error.
+
+    HOW IT WORKS:
+    =============
+    For each network (actor trunk, critic trunk):
+      1. Copy the existing (128, 11) weight into a new (128, 12) tensor.
+      2. Set the new column (column index 11) to zero.
+      3. Replace the parameter in-place.
+
+    Zero-initialising the new column means:
+      - The policy behaves IDENTICALLY to v2 on the first step
+        (the new obs dimension contributes zero to every neuron).
+      - Over training, the new column's weights learn to respond to tyre_life.
+      - This is the principled way to extend NLP embedding matrices too —
+        same idea as adding a new token to a language model's vocabulary.
+
+    The bias vector is NOT touched — it's shape (128,), independent of input dim.
+
+    After calling this function, update model.observation_space and
+    model.policy.observation_space to match the new 12D space before
+    calling model.set_env().
+
+    Args:
+        model:    A loaded SB3 PPO model (11D obs, from ppo_curriculum_v2).
+        old_dim:  Current input dimension (11).
+        new_dim:  Target input dimension (12).
+    """
+    import torch
+    from gymnasium import spaces
+    import numpy as np
+
+    assert new_dim > old_dim, "new_dim must be larger than old_dim"
+
+    with torch.no_grad():
+        for net in [
+            model.policy.mlp_extractor.policy_net,   # actor trunk
+            model.policy.mlp_extractor.value_net,    # critic trunk
+        ]:
+            first_layer = net[0]  # Linear(old_dim, 128)
+            old_w = first_layer.weight.data  # shape (128, old_dim)
+
+            # Build new weight: copy old columns, zero-pad the rest.
+            new_w = torch.zeros(
+                old_w.shape[0], new_dim,
+                dtype=old_w.dtype,
+                device=old_w.device,
+            )
+            new_w[:, :old_dim] = old_w   # copy existing knowledge
+            # new_w[:, old_dim:] is already 0 — new dims start silent
+
+            # Replace the parameter and update in_features for correctness.
+            first_layer.weight = torch.nn.Parameter(new_w)
+            first_layer.in_features = new_dim
+
+    # Update the observation space stored on the model so SB3 doesn't
+    # reject the new env when set_env() is called.
+    old_space = model.observation_space
+    new_high = np.append(old_space.high, np.ones(new_dim - old_dim)).astype(np.float32)
+    new_low  = np.append(old_space.low,  np.zeros(new_dim - old_dim)).astype(np.float32)
+    new_space = spaces.Box(low=new_low, high=new_high, dtype=np.float32)
+
+    model.observation_space         = new_space
+    model.policy.observation_space  = new_space
+
+    print(
+        f"[extend_obs_dim] Expanded input {old_dim}D → {new_dim}D.\n"
+        f"  policy_net[0]: weight shape now {model.policy.mlp_extractor.policy_net[0].weight.shape}\n"
+        f"  value_net[0]:  weight shape now {model.policy.mlp_extractor.value_net[0].weight.shape}\n"
+        f"  New obs space: {new_space}"
+    )
+
+
 def verify_transfer(ppo_model, bc_path: str, device: str) -> None:
     """
     Sanity check: verifies the weight transfer was exact.

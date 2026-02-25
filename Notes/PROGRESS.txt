@@ -487,21 +487,65 @@ BEST MODEL STILL: ppo_curriculum_v2 (rl/ppo_curriculum_v2.zip)
   Fixed start: 100% lap%, 26.92 m/s, 17 laps, 4532 reward.
 
 ==============================================================================
-WHAT'S NEXT (suggested -- Week 5)
+WEEK 5 -- TYRE DEGRADATION (d17)
 ==============================================================================
 
-1. Fix multi-lap training (optional)
-   Recommended approach: Option C (graduated episode length).
-   Add max_steps param to F1Env, run 200k-step phases at 2000→4000→8000→
-   20000→multi_lap. Cleanest path to sustained multi-lap driving.
+What was built:
+  env/car_model.py       DynamicCar: tyre degradation physics.
+                         tyre_life starts at 1.0 per episode, degrades every
+                         step based on tyre slip angles.
+                         wear = 0.0003 + 0.002 * (|alpha_f| + |alpha_r|)
+                         mu = mu_base * max(0.1, tyre_life)
+                         reset_tyres() method restores full grip.
 
-2. Load transfer under braking (vehicle dynamics)
+  env/f1_env.py          tyre_degradation=False param.  When True: obs is 12D
+                         (appends tyre_life ∈ [0,1]), reset() calls reset_tyres(),
+                         info includes tyre_life.
+
+  rl/make_env.py         make_env_tyre(): F1Env(tyre_degradation=True) + Monitor.
+
+  rl/bc_init_policy.py   extend_obs_dim(model, old_dim, new_dim): zero-pads
+                         first layer of actor and critic from 11D to 12D.
+                         Policy behaves identically to v2 on step 0 (new dim
+                         has zero weight, grows via backprop during training).
+
+  rl/train_ppo_tyre.py   Loads ppo_curriculum_v2.zip, extends 11→12D,
+                         runs 2M steps in tyre env, saves ppo_tyre.zip.
+
+  rl/evaluate.py         Added PPO Tyre Degradation entry.  Tyre policies run
+                         in env_tyre (12D obs), all others in standard env (11D).
+
+  Notes/d17.txt          Full documentation of tyre model, obs extension, and
+                         why this avoids catastrophic forgetting (unlike d16).
+
+Tyre wear rates (at different driving styles):
+  Very conservative  (α≈0.05 rad): 0.0004/step → worn at step 2500 (~21 laps)
+  Normal (v2 style)  (α≈0.20 rad): 0.0007/step → worn at step 1429 (~12 laps)
+  Aggressive         (α≈0.50 rad): 0.0013/step → worn at step 769  (~ 6 laps)
+
+Key ML concepts:
+  1. Input dimension extension via zero-padding (principled warm-start extension)
+     New column = zero weight = policy initially ignores it → no forgetting risk.
+  2. Environment change classification: obs-only changes are SAFE; termination
+     changes are UNSAFE (d16 lesson applied here).
+  3. Emergent strategy: agent learns to conserve tyres from physics alone.
+     No explicit tyre-life reward term needed — physics does the reward shaping.
+
+Training: ppo_tyre.zip (running / not yet evaluated)
+
+==============================================================================
+WHAT'S NEXT (suggested -- Week 5 continued)
+==============================================================================
+
+1. Evaluate ppo_tyre: does it conserve tyres? Does ep_len_mean recover?
+   Compare against v2 baseline. Key metric: tyre_life at end of episode.
+
+2. Pit stop mechanic (d18)
+   Add 3rd action dimension: pit_signal ∈ [-1, 1].  pit_signal > 0 → pit.
+   Pit effect: car.reset_tyres() + reward penalty (time cost).
+   Action space becomes Box(3,) — requires new BC training and curriculum.
+   The agent must discover WHEN to pit, not just how hard to push.
+
+3. Load transfer under braking (vehicle dynamics)
    DynamicCar doesn't shift weight between axles when braking.
-   Under hard braking, front tyres gain load (more grip), rear loses it.
-   Implementing this makes braking physics more realistic and gives
-   the agent a reason to trail-brake into corners (F1 technique).
-
-3. Tyre degradation / fuel strategy  <-- the real Week 5 project
-   Add grip = 1.5 - 0.0002 * step_count to DynamicCar.
-   Agent must manage tyre life across a stint, not just maximise
-   instantaneous speed. This is the core of real F1 race strategy.
+   Implementing this makes braking physics more realistic.

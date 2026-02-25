@@ -29,7 +29,7 @@ from rl.rewards import RacingReward
 class F1Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30} #info used for rendering
 
-    def __init__(self, render_mode=None, dt=0.1, multi_lap=False):
+    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False):
         super().__init__()
         self.dt = dt #dt = how much simulated time passes each step(). Same as in Car
         self.render_mode = render_mode #render_mode = you'll use this later if you draw stuff
@@ -56,6 +56,24 @@ class F1Env(gym.Env):
         #     - The value function learns to estimate multi-lap returns
         self.multi_lap = multi_lap
 
+        # ── Tyre degradation mode (Week 5) ────────────────────────────────────
+        # When False (default): DynamicCar.tyre_life is never reset or exposed.
+        #   The car behaves as in d1–d16: perfect grip forever.
+        #   All existing training scripts and policies are unchanged.
+        #
+        # When True:
+        #   - car.reset_tyres() is called at the start of each episode.
+        #   - tyre_life is appended to the observation vector → obs becomes 12D.
+        #   - observation_space is Box(12,) instead of Box(11,).
+        #   - The agent can see its tyre state and learn when to conserve grip.
+        #
+        # WHY IS THIS A FLAG RATHER THAN ALWAYS-ON?
+        #   Backward compatibility.  All existing policies (v2, multi_lap, etc.)
+        #   were trained with 11D obs.  Turning on tyre_degradation changes the
+        #   obs space and requires a new policy.  The flag lets us keep the old
+        #   policies working without modification.
+        self.tyre_degradation = tyre_degradation
+
         #Track
         self.track = generate_oval_track() #you generate a simple circular-ish track (list of (x,y) points)
 
@@ -65,7 +83,14 @@ class F1Env(gym.Env):
         # but internally runs a 6-state dynamic model with tyre slip physics.
         # The rest of the environment code doesn't need to change because
         # DynamicCar exposes backward-compatible .yaw and .v properties.
-        self.car = DynamicCar()
+        #
+        # Week 5: when tyre_degradation=True, DynamicCar is created with
+        # non-zero base_wear and slip_coef so mu degrades over the episode.
+        # When False (default), both are 0.0 → mu = 1.5 forever (backward compat).
+        if self.tyre_degradation:
+            self.car = DynamicCar(base_wear=0.0003, slip_coef=0.002)
+        else:
+            self.car = DynamicCar()   # base_wear=0.0, slip_coef=0.0 (no degradation)
 
         #Action: [throttle, steer_norm]
         self.action_space = spaces.Box(
@@ -139,6 +164,14 @@ class F1Env(gym.Env):
             [0.0, -np.pi, -50.0, -1.0, -1.0, -np.pi, -np.pi, -np.pi, 0.0, -20.0, -5.0],
             dtype=np.float32
         )
+        if self.tyre_degradation:
+            # Append tyre_life ∈ [0.0, 1.0]:
+            #   1.0 = brand new tyres (full grip)
+            #   0.0 = completely worn (10% grip floor, car barely controllable)
+            # This is the 12th dimension the agent uses to decide when to
+            # conserve grip or push harder.
+            obs_high = np.append(obs_high, 1.0).astype(np.float32)
+            obs_low  = np.append(obs_low,  0.0).astype(np.float32)
         self.observation_space = spaces.Box(
             low = obs_low,
             high = obs_high,
@@ -260,7 +293,7 @@ class F1Env(gym.Env):
         v_y = getattr(self.car, 'v_y', 0.0)   # lateral sliding speed (m/s)
         r   = getattr(self.car, 'r',   0.0)   # yaw rate (rad/s)
 
-        # ── Assemble 11D observation vector ────────────────────────────
+        # ── Assemble 11D (or 12D) observation vector ───────────────────
         obs = np.array([
             v             / 20.0,   # [0]  speed
             heading_error / np.pi,  # [1]  heading error
@@ -274,6 +307,13 @@ class F1Env(gym.Env):
             v_y           / 5.0,    # [9]  lateral velocity
             r             / 2.0,    # [10] yaw rate
         ], dtype=np.float32)
+
+        if self.tyre_degradation:
+            # [11] tyre_life in [0, 1]: tells the agent how much grip remains.
+            # 1.0 = fresh tyres; 0.0 = completely worn (10% grip floor still active).
+            # Already normalised — no division needed.
+            tyre_life = float(getattr(self.car, 'tyre_life', 1.0))
+            obs = np.append(obs, tyre_life).astype(np.float32)
 
         return obs
     '''
@@ -338,6 +378,12 @@ class F1Env(gym.Env):
             yaw = yaw,
             v   = v,
         )
+
+        # Reset tyres to full grip at the start of each episode.
+        # Only active when tyre_degradation=True — this is where the stint begins.
+        # In a future pit-stop extension (d18), this will also be called mid-episode.
+        if self.tyre_degradation:
+            self.car.reset_tyres()
 
         obs = self.get_obs()
         # get_obs() sets self._track_idx to the car's actual starting waypoint.
@@ -437,6 +483,10 @@ class F1Env(gym.Env):
             # evaluate.py reads this instead of recomputing it with closest_point().
             # CurriculumCallback can also log this for TensorBoard.
             "laps_completed": self.laps_completed,
+            # Tyre life remaining at this step (1.0 = new, 0.0 = worn).
+            # Only meaningful when tyre_degradation=True; always 1.0 otherwise
+            # (DynamicCar.tyre_life starts at 1.0 and never degrades without reset_tyres).
+            "tyre_life": float(getattr(self.car, 'tyre_life', 1.0)),
         }
         return obs, reward, terminated, truncated, info
 
