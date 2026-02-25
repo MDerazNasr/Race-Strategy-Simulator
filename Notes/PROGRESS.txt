@@ -369,27 +369,61 @@ The lap bonus explains the reward jump vs d13:
   Random-start curriculum: 91 (d13) → 160 (d14)  = +69  ≈ ~0.7 laps × 100
 
 ==============================================================================
+WEEK 4 (continued) -- CONTINUED TRAINING: PPO CURRICULUM V2  (d15)
+==============================================================================
+
+What was built:
+  rl/train_ppo_continue.py   Continues from ppo_curriculum.zip for 2M more
+                             Stage 3 steps. Lower LR (1e-4→1e-6) for
+                             fine-tuning. Uses lap-bonus reward from d14.
+
+Training metrics:
+  ep_rew_mean end of v2 run: ~2,250   (vs ~1,100 at end of v1)
+  ep_len_mean end of v2 run: ~1,010   (agent surviving ~half the episode)
+  Total steps: 3,002,368
+
+Final evaluation results (fixed start, N=10, deterministic):
+
+  Policy                   Lap%    Reward   Speed(m/s)  LatErr(m)  Laps
+  ----------------------------------------------------------------------
+  Expert (rule-based)      100%    2909.1     17.10       0.797    11.0
+  BC (imitation)           100%    2909.1     17.03       0.756    11.0
+  PPO + BC + Stable (1M)     0%     135.1     24.60       0.874     0.0
+  PPO + BC + Curriculum (1M) 0%     258.9     25.00       0.981     1.0
+  PPO Curriculum v2 (3M)   100% <- 4531.7 <- 26.92 <-    0.678 <- 17.0 <-
+  ----------------------------------------------------------------------
+  <- = best in column   (v2 wins on every single metric)
+
+Random start (N=20):
+  v2:    40% lap completion, 1776 reward, 14.7 m/s, 6.75 laps (BEST)
+  Expert: 35%,              1003 reward,  9.1 m/s, 3.85 laps
+
+Key results vs expert (fixed start):
+  Speed:   26.9 vs 17.1 m/s   (+57%)
+  Laps:    17   vs 11          (+55%)
+  Reward:  4532 vs 2909        (+56%)
+
+The full arc of the project is complete. PPO with BC warm start +
+curriculum + 3M steps + lap bonus now wins decisively over the
+rule-based expert on every metric, in both evaluation modes.
+
+==============================================================================
 WHAT'S NEXT (suggested)
 ==============================================================================
 
-1. Longer curriculum training (3M+ steps)   <-- highest impact
-   Stage 3 reward was still climbing at 1M steps (~1100).
-   Fixed-start eval showed PPO goes 25 m/s but crashes. More training
-   would teach tyre management and likely flip the fixed-start ranking.
-
-2. Multi-lap training
+1. Multi-lap training
    Modify env to reset ONLY on crash (not on max_steps truncation).
-   Let the agent run across many laps in a single episode.
-   With the lap bonus now in place, this would give a very clean
-   training signal: survive + go fast + complete laps.
+   Let the agent run indefinitely across laps in a single episode.
+   ep_rew_mean plateaued at ~2,250 with 2000-step cap. Removing the
+   cap would let the policy discover longer strategies.
 
-3. Load transfer under braking (vehicle dynamics)
+2. Load transfer under braking (vehicle dynamics)
    DynamicCar doesn't shift weight between axles when braking.
    Under hard braking, front tyres gain load (more grip), rear loses it.
-   Implementing this makes the car's braking more realistic and gives
+   Implementing this makes braking physics more realistic and gives
    the agent a reason to trail-brake into corners (F1 technique).
 
-4. Tyre degradation / fuel strategy
+3. Tyre degradation / fuel strategy  <-- the real Week 5 project
    Add grip = 1.5 - 0.0002 * step_count to DynamicCar.
    Agent must manage tyre life across a stint, not just maximise
    instantaneous speed. This is the core of real F1 race strategy.
