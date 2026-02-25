@@ -130,6 +130,34 @@ def train():
     # ── Attach the new 12D env ────────────────────────────────────────────────
     model.set_env(env)
 
+    # ── Reinitialise rollout buffer with new 12D obs shape ────────────────────
+    # ROOT CAUSE OF THE BUG:
+    #   PPO.load() creates the rollout buffer using the LOADED obs space (11D).
+    #   extend_obs_dim() updates the policy network and model.observation_space,
+    #   but NOT the rollout buffer.  When model.learn() calls collect_rollouts(),
+    #   it tries to store 12D observations into an 11D buffer → shape mismatch.
+    #
+    # FIX:
+    #   Recreate the rollout buffer using the new 12D observation_space.
+    #   All other buffer parameters (n_steps, gamma, gae_lambda, n_envs) stay
+    #   the same as the original loaded model.
+    #
+    # WHY NOT model._setup_model()?
+    #   _setup_model() would reinitialise the entire policy network (random
+    #   weights), discarding everything we loaded and extended.  We only want
+    #   to recreate the buffer, not the policy.
+    from stable_baselines3.common.buffers import RolloutBuffer
+    model.rollout_buffer = RolloutBuffer(
+        model.n_steps,
+        model.observation_space,   # now 12D
+        model.action_space,
+        device=model.device,
+        gae_lambda=model.gae_lambda,
+        gamma=model.gamma,
+        n_envs=model.n_envs,
+    )
+    print(f"[Train] Rollout buffer recreated with obs shape: {model.rollout_buffer.obs_shape}")
+
     # ── Learning rate: same as d15 continuation ───────────────────────────────
     # 1e-4 → 1e-6 cosine.  We can afford this (higher than d16's 5e-5) because:
     #   - We're not changing episode termination (no d16-style crash).
