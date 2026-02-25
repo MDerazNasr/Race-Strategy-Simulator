@@ -133,6 +133,27 @@ class F1Env(gym.Env):
         # None on the first step of each episode; RacingReward handles this gracefully.
         self._prev_action = None
         self._prev_obs = None
+
+        # ── Lap tracking ──────────────────────────────────────────────────────
+        # The oval has 200 waypoints (indices 0–199).  A full lap is detected
+        # when the closest waypoint index wraps from a high value (~195) back
+        # to a low value (~5), i.e., the car crossed the start/finish line.
+        #
+        # Why handle this in the env rather than evaluate.py?
+        #   The reward signal must know about lap completions so the agent
+        #   can be incentivised to finish laps, not just survive steps.
+        #   evaluate.py previously duplicated this logic; it now reads
+        #   env.laps_completed directly, keeping one source of truth.
+        #
+        # lap_bonus = one-time reward added to the step reward when a lap
+        #   completes.  Set to 100.0:
+        #   - A full lap at max speed ≈ 2000 steps × ~1.0 max step reward = ~2000.
+        #   - 100 is ~5% of that — significant enough to push the agent to stay
+        #     alive to the end, but not so large it overwhelms the per-step signal.
+        self.lap_bonus = 100.0       # reward added once per completed lap
+        self._track_idx = 0          # current closest waypoint; updated by get_obs()
+        self._prev_track_idx = 0     # previous step's waypoint; used for wrap detection
+        self.laps_completed = 0      # cumulative laps completed this episode
     '''
     in RL your agent needs an observation vector each step: a compact summary of whats going on right now
 
@@ -183,6 +204,7 @@ class F1Env(gym.Env):
 
         # ── Find closest waypoint on the track ────────────────────────
         idx, _ = closest_point(self.track, x, y)
+        self._track_idx = idx          # expose for step() lap detection
         n_wpts = len(self.track)
 
         # ── Track direction and errors at current position ─────────────
@@ -255,25 +277,52 @@ class F1Env(gym.Env):
         self.step_count = 0       # reset step counter
         self._prev_action = None  # clear previous action (no smoothness penalty on step 0)
         self._prev_obs = None     # clear previous obs
+        self.laps_completed = 0   # reset lap counter for this episode
 
-        #random starting index
-        idx = self.np_random.integers(0, len(self.track))
-        start = self.track[idx]
+        if options and options.get("fixed_start"):
+            # ── Fixed start: waypoint 0, track-aligned, v=5 m/s ──────────────
+            # Used by evaluate.py to give all policies an identical starting
+            # condition for a fair apples-to-apples comparison.
+            #
+            # WHY fixed start matters:
+            #   Random evaluation penalises fast policies unfairly.
+            #   At 15 m/s a large heading offset causes a crash in < 1 s.
+            #   The rule-based expert at 8 m/s can recover from the same
+            #   starting error, so it scores higher on lap-completion rate
+            #   even though it drives slower.  Fixed start removes that bias.
+            #
+            # Waypoint 0 is at (50, 0) on the oval.
+            # The track tangent there points approximately north (≈ π/2 rad),
+            # so yaw = track_angle gives a car pointing exactly along the track.
+            start = self.track[0]
+            track_angle, _ = track_tangent(self.track, 0)
+            yaw = track_angle   # aligned with track — zero perturbation
+            v   = 5.0           # moderate starting speed
 
-        # random yaw pertubation (~+/- 10 degrees)
-        yaw = self.np_random.uniform(-0.17, 0.17)
-
-        #small random initial speed
-        v = self.np_random.uniform(2.0, 6.0)
+        else:
+            # ── Random start (default, used during training) ──────────────────
+            # Random position AND random heading (±10 °) teaches the policy to
+            # recover from any configuration, not only clean starts.
+            # This is the correct training distribution; the evaluation noise is
+            # an acceptable trade-off for a more robust policy.
+            idx   = self.np_random.integers(0, len(self.track))
+            start = self.track[idx]
+            yaw   = self.np_random.uniform(-0.17, 0.17)   # ±~10 degrees
+            v     = self.np_random.uniform(2.0, 6.0)
 
         self.car.reset(
-            x = start[0],
-            y = start[1],
-            yaw=yaw,
-            v=v,
+            x   = start[0],
+            y   = start[1],
+            yaw = yaw,
+            v   = v,
         )
 
         obs = self.get_obs()
+        # get_obs() sets self._track_idx to the car's actual starting waypoint.
+        # Initialise _prev_track_idx here so the first step in step() has a
+        # valid reference and doesn't spuriously count a lap on step 1.
+        self._prev_track_idx = self._track_idx
+
         info = {}
         return obs, info
     
@@ -298,6 +347,26 @@ class F1Env(gym.Env):
         # 2. Compute observation from the new car state.
         obs = self.get_obs()
 
+        # ── Lap detection ─────────────────────────────────────────────────────
+        # get_obs() has just updated self._track_idx.  Compare against the
+        # previous step's index to detect a start/finish line crossing.
+        #
+        # Detection rule: index jumps from > 150 to < 50.
+        #   Normal forward progress increases the index by 1–3 per step.
+        #   A backward jump of 150+ indices can ONLY mean the car crossed
+        #   waypoint 0 (the start/finish line) in the forward direction.
+        #
+        # This is identical to the logic previously in evaluate.py, so both
+        # sources now agree on the lap count.  evaluate.py reads env.laps_completed
+        # directly instead of recomputing it.
+        curr_idx = self._track_idx
+        if self._prev_track_idx > 150 and curr_idx < 50:
+            self.laps_completed += 1
+            lap_bonus = self.lap_bonus   # +100.0 one-time bonus
+        else:
+            lap_bonus = 0.0
+        self._prev_track_idx = curr_idx
+
         # 3. Determine termination before computing reward, because the
         #    terminal penalty is baked into RacingReward.compute().
         lateral_error = obs[2]  # normalized: raw / 3.0, range ≈ [-1, 1]
@@ -317,7 +386,11 @@ class F1Env(gym.Env):
             action=np.array(action, dtype=np.float32),
             prev_action=self._prev_action,
             terminated=terminated,
-        )
+        ) + lap_bonus
+        # lap_bonus is +100.0 exactly once per completed lap, 0.0 on all other steps.
+        # Added AFTER reward_fn so it doesn't interfere with shaped per-step terms.
+        # 100 >> max per-step reward (~1.1), so the agent is rewarded decisively
+        # for completing laps rather than just running many steps.
 
         # 5. Store current obs/action for next step's smoothness penalty.
         self._prev_obs    = obs
@@ -334,7 +407,11 @@ class F1Env(gym.Env):
             # Used by CurriculumCallback to distinguish crashes from lap completions.
             # True  = episode ended because car went off-track (bad outcome).
             # False = episode ended by reaching max_steps (survived = good outcome).
-            "crashed":       bool(terminated),
+            "crashed":        bool(terminated),
+            # Cumulative laps completed so far this episode.
+            # evaluate.py reads this instead of recomputing it with closest_point().
+            # CurriculumCallback can also log this for TensorBoard.
+            "laps_completed": self.laps_completed,
         }
         return obs, reward, terminated, truncated, info
 

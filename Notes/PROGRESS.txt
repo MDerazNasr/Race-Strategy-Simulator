@@ -334,26 +334,62 @@ Architecture (fixed throughout):
   Episode length:    2000 steps = 200 seconds at dt=0.1s
 
 ==============================================================================
+WEEK 4 -- METRICS IMPROVEMENTS  (d14)
+==============================================================================
+
+What was built:
+  env/f1_env.py     Lap tracking: wrap-around detection, +100 bonus per lap,
+                    laps_completed in info dict, fixed_start in reset(options).
+  rl/evaluate.py    fixed_start param throughout; two evaluation modes;
+                    lap counting consolidated to env (removed duplicate logic).
+
+Evaluation results after d14 (includes lap bonus in reward):
+
+  RANDOM START (N=20):
+    Expert (rule)        30%   856.4    8.53 m/s  1.494 m  3.30 laps
+    BC (imitation)       25%   709.8    7.75 m/s  1.495 m  2.75 laps
+    PPO + BC + Stable     0%   298.9   15.63 m/s  1.001 m  1.25 laps
+    PPO + BC + Curriculum 0%   160.0   14.34 m/s  1.153 m  0.80 laps
+
+  FIXED START (N=10, deterministic — std=0):
+    Expert (rule)       100%  2909.1   17.10 m/s  0.797 m  11.0 laps <-
+    BC (imitation)      100%  2909.1   17.03 m/s  0.756 m  11.0 laps <-
+    PPO + BC + Stable     0%   135.1   24.60 m/s  0.874 m   0.0 laps
+    PPO + BC + Curriculum 0%   258.9   25.00 m/s  0.981 m   1.0 laps
+
+Key insight from fixed-start evaluation:
+  PPO policies go 24-25 m/s but crash before completing sustained laps.
+  Expert/BC at 17 m/s complete 11 laps (full 2000-step episode).
+  This confirms: PPO learned to go fast but not to manage tyre slip over
+  sustained laps. The fix is longer curriculum training (Stage 3 at 3M+
+  steps), not a new technique.
+
+The lap bonus explains the reward jump vs d13:
+  Random-start expert:    618 (d13) → 856 (d14)  = +238 ≈ 2.38 extra laps × 100
+  Random-start curriculum: 91 (d13) → 160 (d14)  = +69  ≈ ~0.7 laps × 100
+
+==============================================================================
 WHAT'S NEXT (suggested)
 ==============================================================================
 
-1. Lap-aware reward
-   Add +100 reward on each completed lap. Curriculum policy almost
-   completes laps (0.75 avg). A lap bonus would push it over the line
-   and improve the 0% lap completion metric.
-   Change: rl/rewards.py + env/f1_env.py lap counter.
+1. Longer curriculum training (3M+ steps)   <-- highest impact
+   Stage 3 reward was still climbing at 1M steps (~1100).
+   Fixed-start eval showed PPO goes 25 m/s but crashes. More training
+   would teach tyre management and likely flip the fixed-start ranking.
 
-2. Fixed-start evaluation
-   The random-start evaluation penalises fast policies unfairly.
-   Run evaluation from a single fixed start (index 0, yaw=0, v=5 m/s)
-   to get a fair comparison. This should flip the lap completion ranking.
-   Change: rl/evaluate.py, add a fixed_start=True option.
+2. Multi-lap training
+   Modify env to reset ONLY on crash (not on max_steps truncation).
+   Let the agent run across many laps in a single episode.
+   With the lap bonus now in place, this would give a very clean
+   training signal: survive + go fast + complete laps.
 
-3. Longer curriculum training (2M+ steps)
-   Stage 3 ran for ~900k steps. The reward was still climbing (~1100).
-   More training would likely push speed to 18-20 m/s with lap completion.
+3. Load transfer under braking (vehicle dynamics)
+   DynamicCar doesn't shift weight between axles when braking.
+   Under hard braking, front tyres gain load (more grip), rear loses it.
+   Implementing this makes the car's braking more realistic and gives
+   the agent a reason to trail-brake into corners (F1 technique).
 
 4. Tyre degradation / fuel strategy
-   Add grip=1.5-0.0002*step_count to DynamicCar. Agent must manage tyre
-   life across a stint, not just maximise instantaneous speed.
-   This is the core of real F1 race strategy.
+   Add grip = 1.5 - 0.0002 * step_count to DynamicCar.
+   Agent must manage tyre life across a stint, not just maximise
+   instantaneous speed. This is the core of real F1 race strategy.
