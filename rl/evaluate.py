@@ -589,6 +589,25 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_pit.zip",
             "env_key":       "pit",   # routes to env_pit (3D action space)
         },
+        {
+            "name":          "PPO Pit Strategy v2 (d19)",
+            "color":         "#B388FF",
+            # d19 fixes all three root causes that prevented d18 from discovering pits:
+            #   Fix 1: Balanced BC dataset (generate_dataset_pit_v2 — pit-only episodes).
+            #          Pit-positive fraction: 0.03% (d18) → ~5% (d19).
+            #   Fix 2: gamma=0.9999 (was 0.99 in d18).
+            #          Pit payoff discounted to 90% instead of 0.004%.
+            #   Fix 3: Stage 0 forced pits (every 500 steps, ~100k steps).
+            #          Value function bootstrapped with real pit experiences
+            #          before agent must signal pits itself.
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v2.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v2.zip",
+            "env_key":       "pit",   # routes to env_pit (3D action space)
+        },
     ]
 
     summaries = []

@@ -81,22 +81,29 @@ class CurriculumStage:
     The policy and value function weights carry forward unchanged.
 
     Fields:
-        name:          Human-readable label (logged to TensorBoard)
-        max_accel:     DynamicCar.max_accel (m/s^2) -- limits top speed.
-                       At max_accel=6  m/s^2, terminal speed ~  8 m/s
-                       At max_accel=11 m/s^2, terminal speed ~ 15 m/s
-                       At max_accel=15 m/s^2, original DynamicCar limit
-        reward_kwargs: Keyword arguments forwarded to RacingReward().
-                       Controls what behaviour is incentivised each stage.
-        grad_lap_rate: Minimum rolling lap completion rate to graduate.
-        grad_window:   Number of consecutive rollouts to average over.
-                       Larger window = more stable graduation criterion.
+        name:                Human-readable label (logged to TensorBoard)
+        max_accel:           DynamicCar.max_accel (m/s^2) -- limits top speed.
+                             At max_accel=6  m/s^2, terminal speed ~  8 m/s
+                             At max_accel=11 m/s^2, terminal speed ~ 15 m/s
+                             At max_accel=15 m/s^2, original DynamicCar limit
+        reward_kwargs:       Keyword arguments forwarded to RacingReward().
+                             Controls what behaviour is incentivised each stage.
+        grad_lap_rate:       Minimum rolling lap completion rate to graduate.
+        grad_window:         Number of consecutive rollouts to average over.
+                             Larger window = more stable graduation criterion.
+        forced_pit_interval: Steps between forced pits (d19 Stage 0 only).
+                             0 = disabled (default, backward compatible).
+                             500 = force a pit at step 500, 1000, 1500, ...
+                             Used in STAGES_PIT_V2 Stage 0 to bootstrap the
+                             value function with pit experiences before the
+                             agent is required to signal pits itself.
     """
-    name:          str
-    max_accel:     float
-    reward_kwargs: Dict   = field(default_factory=dict)
-    grad_lap_rate: float  = 0.4
-    grad_window:   int    = 5
+    name:                str
+    max_accel:           float
+    reward_kwargs:       Dict   = field(default_factory=dict)
+    grad_lap_rate:       float  = 0.4
+    grad_window:         int    = 5
+    forced_pit_interval: int    = 0   # d19: 0 = disabled (default)
 
 
 # =============================================================================
@@ -157,6 +164,131 @@ STAGES: List[CurriculumStage] = [
         name          = "Stage 3 -- Full Racing (no cap)",
         max_accel     = 15.0,
         reward_kwargs = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.1,
+            lateral_weight    = 0.5,
+            heading_weight    = 0.1,
+            smoothness_weight = 0.05,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 1.1,   # impossible threshold -- never graduates
+        grad_window   = 9999,
+    ),
+]
+
+
+# =============================================================================
+# PIT STRATEGY V2 CURRICULUM  (d19)
+# =============================================================================
+#
+# PROBLEM (d18 failure analysis):
+#   The d18 agent never discovered pitting despite a BC warm-start.
+#   Three root causes:
+#     1. BC class imbalance: 3,400:1 no-pit to pit-positive samples.
+#        MSE loss dominated by "no-pit" class → BC policy pushes pit_signal
+#        toward -1.0 at initialisation.
+#     2. gamma=0.99 discounts 1000-step future gains to near zero.
+#        0.99^1000 ≈ 4e-5. The value function cannot see the tyre benefit.
+#     3. Entropy collapse: by Stage 3, std(pit_signal) ≈ 0.54 centred at -1.0.
+#        P(pit_signal > 0) ≈ 0. The agent never explores pitting at all.
+#
+# FIXES (d19):
+#   Fix 1 (handled in train_ppo_pit_v2.py): balanced BC dataset.
+#     generate_dataset_pit_v2() only keeps episodes where at least 1 pit fired.
+#     Pit-positive fraction rises from ~0.03% to ~3-5%.
+#
+#   Fix 2 (handled in train_ppo_pit_v2.py): gamma=0.9999.
+#     0.9999^1000 ≈ 0.905. The value function now sees 90% of rewards 1000
+#     steps away — the pit payoff is visible to the gradient signal.
+#
+#   Fix 3 (THIS CURRICULUM): forced pit exploration Stage 0.
+#     Even with gamma=0.9999, the value function needs ACTUAL pit experiences
+#     to bootstrap Q(s,pit). If the agent never pits, it never learns the value.
+#     Stage 0 forces a pit every 500 steps for ~100k steps.
+#     After Stage 0 the agent has seen "tyre reset → more reward" many times.
+#     The value function now knows Q(s,pit) > Q(s,no-pit) when tyres are worn.
+#     Stage 1–3 are identical to STAGES — the agent drives freely and must
+#     signal pits itself, but now it has a learned reason to do so.
+#
+# STAGE SCHEDULE:
+#   Stage 0: ~100k steps  (50 rollouts × 2048)  forced pits every 500 steps
+#   Stage 1: graduates at 50% lap rate           stability, low speed
+#   Stage 2: graduates at 30% lap rate           speed unlocked
+#   Stage 3: runs until total_timesteps          full racing + pit strategy
+#
+STAGES_PIT_V2: List[CurriculumStage] = [
+
+    # -- Stage 0: Forced Pit Exploration -------------------------------------
+    # Goal: bootstrap the value function with pit experiences.
+    #
+    # forced_pit_interval=500: env fires a pit at step 500 and step 1000 of
+    # every episode.  The agent sees tyre_life reset to 1.0 and gains more
+    # reward in the second half of the episode.  The value function learns:
+    #   Q(s_500, pit) >> Q(s_500, no-pit)
+    # even before the agent learns to signal pit_signal > 0.
+    #
+    # Graduation: grad_lap_rate=0.0 means ANY survival rate passes.
+    # grad_window=50 → must see 50 rollouts before graduating.
+    # 50 × 2048 ≈ 102,400 steps — enough for the value function to bootstrap.
+    #
+    # Speed cap: max_accel=6 (same as Stage 1).  Keep the car controllable
+    # while the value function is learning the pit benefit.
+    CurriculumStage(
+        name                = "Stage 0 -- Forced Pit Exploration",
+        max_accel           = 6.0,
+        forced_pit_interval = 500,   # force pit at step 500, 1000, 1500, ...
+        reward_kwargs       = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.0,
+            lateral_weight    = 1.0,
+            heading_weight    = 0.2,
+            smoothness_weight = 0.1,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 0.0,    # graduate after filling the window
+        grad_window   = 50,     # 50 rollouts × 2048 steps ≈ 100k steps
+    ),
+
+    # -- Stage 1: Stability (same as STAGES Stage 1, forced pits OFF) --------
+    CurriculumStage(
+        name                = "Stage 1 -- Stability (<=8 m/s)",
+        max_accel           = 6.0,
+        forced_pit_interval = 0,     # agent must signal pits
+        reward_kwargs       = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.0,
+            lateral_weight    = 1.0,
+            heading_weight    = 0.2,
+            smoothness_weight = 0.1,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 0.5,
+        grad_window   = 5,
+    ),
+
+    # -- Stage 2: Speed (same as STAGES Stage 2) -----------------------------
+    CurriculumStage(
+        name                = "Stage 2 -- Speed (<=15 m/s)",
+        max_accel           = 11.0,
+        forced_pit_interval = 0,
+        reward_kwargs       = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.1,
+            lateral_weight    = 0.5,
+            heading_weight    = 0.1,
+            smoothness_weight = 0.05,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 0.3,
+        grad_window   = 5,
+    ),
+
+    # -- Stage 3: Racing (same as STAGES Stage 3) ----------------------------
+    CurriculumStage(
+        name                = "Stage 3 -- Full Racing (no cap)",
+        max_accel           = 15.0,
+        forced_pit_interval = 0,
+        reward_kwargs       = dict(
             progress_weight   = 1.0,
             speed_weight      = 0.1,
             lateral_weight    = 0.5,
@@ -248,9 +380,16 @@ class CurriculumCallback(BaseCallback):
         # Swap the reward function for this stage's weights
         inner_env.reward_fn = RacingReward(**stage.reward_kwargs)
 
+        # d19: Update forced pit interval (0 = disabled, >0 = force pit every N steps).
+        # hasattr check for backward compatibility with any env that predates this field.
+        if hasattr(inner_env, 'forced_pit_interval'):
+            inner_env.forced_pit_interval = stage.forced_pit_interval
+
         if self.verbose >= 1:
             print(f"\n[Curriculum] Applying: {stage.name}")
             print(f"             max_accel = {stage.max_accel} m/s^2")
+            if stage.forced_pit_interval > 0:
+                print(f"             forced_pit_interval = {stage.forced_pit_interval} steps")
 
     # -- Called once at training start ----------------------------------------
     def _on_training_start(self) -> None:

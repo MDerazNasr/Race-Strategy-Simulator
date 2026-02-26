@@ -29,7 +29,7 @@ from rl.rewards import RacingReward
 class F1Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30} #info used for rendering
 
-    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False, pit_stops=False):
+    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False, pit_stops=False, forced_pit_interval=0):
         super().__init__()
         self.dt = dt #dt = how much simulated time passes each step(). Same as in Car
         self.render_mode = render_mode #render_mode = you'll use this later if you draw stuff
@@ -88,6 +88,31 @@ class F1Env(gym.Env):
         assert not (pit_stops and not tyre_degradation), \
             "pit_stops=True requires tyre_degradation=True"
         self.pit_stops = pit_stops
+
+        # ── Forced pit interval (Week 5 / d19) ───────────────────────────────
+        # When > 0: the environment forces a pit every forced_pit_interval steps,
+        # ignoring the agent's pit_signal and cooldown.
+        #
+        # PURPOSE (d19 Stage 0 curriculum):
+        #   d18 showed the agent never discovers pitting because:
+        #     (a) gamma=0.99 discounts the 1000-step future benefit to near zero.
+        #     (b) BC class imbalance → policy initialised away from pit_signal>0.
+        #     (c) Exploration std collapses → P(pit_signal>0) ≈ 0.
+        #   Even with gamma=0.9999 (Fix 2), the VALUE FUNCTION needs pit
+        #   experiences to bootstrap from. If the agent never pits, Q(s,pit)
+        #   stays at its random initialisation — no gradient pulls pit_signal up.
+        #
+        #   Forced pits give the agent guaranteed pit experiences in Stage 0.
+        #   The value function sees: "step 500 → tyre resets → +X more reward."
+        #   Once it knows pitting is good, Stage 1 releases the forced pits and
+        #   the agent must signal pits itself — but now it has a learned reason to.
+        #
+        # DESIGN:
+        #   forced_pit_interval=500 → pit at step 500, 1000, 1500, ...
+        #   Forced pits bypass cooldown (interval > cooldown=100, so no conflict
+        #   at 500-step intervals; bypass keeps code simple for shorter intervals).
+        #   forced_pit_interval=0 → disabled (all existing behaviour unchanged).
+        self.forced_pit_interval = forced_pit_interval
 
         #Track
         self.track = generate_oval_track() #you generate a simple circular-ish track (list of (x,y) points)
@@ -500,11 +525,22 @@ class F1Env(gym.Env):
         #
         # Each step: decrement cooldown by 1 (regardless of pit signal).
         pit_reward = 0.0
-        if self.pit_stops and pit_signal > 0.0 and self.pit_cooldown_remaining == 0:
-            self.car.reset_tyres()
-            pit_reward = self.PIT_PENALTY
-            self.pit_cooldown_remaining = self.PIT_COOLDOWN_STEPS
-            self.pit_count += 1
+        if self.pit_stops:
+            # Forced pit (d19 Stage 0): overrides agent signal and cooldown.
+            # Fires at regular intervals so the value function learns pit benefit
+            # before the agent is required to discover pitting on its own.
+            forced_pit = (
+                self.forced_pit_interval > 0
+                and self.step_count % self.forced_pit_interval == 0
+            )
+            # Normal agent-signaled pit: requires pit_signal > 0 and no cooldown.
+            agent_pit = (pit_signal > 0.0 and self.pit_cooldown_remaining == 0)
+
+            if forced_pit or agent_pit:
+                self.car.reset_tyres()
+                pit_reward = self.PIT_PENALTY
+                self.pit_cooldown_remaining = self.PIT_COOLDOWN_STEPS
+                self.pit_count += 1
 
         if self.pit_cooldown_remaining > 0:
             self.pit_cooldown_remaining -= 1
