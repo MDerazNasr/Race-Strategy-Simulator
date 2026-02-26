@@ -492,9 +492,11 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
     device = "cpu"   # evaluation is fast enough on CPU
     # Standard 11D env shared across all non-tyre policies.
     env = F1Env()
-    # Tyre degradation env (12D obs) — created once and reused for tyre policies.
-    # Separate env needed because obs dim must match the policy's input layer.
+    # Tyre degradation env (12D obs, 2D actions) — for ppo_tyre policy.
     env_tyre = F1Env(tyre_degradation=True)
+    # Pit-stop env (12D obs, 3D actions) — for ppo_pit policy (d18).
+    # Separate env needed because action space must match the policy.
+    env_pit = F1Env(tyre_degradation=True, pit_stops=True)
 
     start_label = "FIXED START" if fixed_start else "RANDOM START"
     print("=" * 60)
@@ -571,6 +573,22 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional":      True,
             "optional_file": "ppo_tyre.zip",
         },
+        {
+            "name":          "PPO Pit Stops (6M+)",
+            "color":         "#FF4081",
+            # Trained from scratch with 3D action space [throttle, steer, pit_signal].
+            # BC warm start from expert_data_pit.npz (pit-aware demonstrations).
+            # Full curriculum learning (same STAGES as ppo_curriculum).
+            # Pit strategy: pay -200 to reset tyre_life, gain speed for remaining steps.
+            # Evaluated in pit-stop env (12D obs, 3D action space).
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit.zip",
+            "env_key":       "pit",   # routes to env_pit (3D action space)
+        },
     ]
 
     summaries = []
@@ -592,9 +610,16 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
 
         policy_fn = cfg["fn"]()   # build the policy function
 
-        # Tyre-degradation policies expect 12D obs — use the tyre env.
-        # All other policies use the standard 11D env.
-        eval_env = env_tyre if cfg.get("optional_file") == "ppo_tyre.zip" else env
+        # Route each policy to the matching environment:
+        #   - ppo_pit.zip  → env_pit (12D obs, 3D action space with pit signal)
+        #   - ppo_tyre.zip → env_tyre (12D obs, 2D action space, no pit)
+        #   - all others   → env (11D obs, 2D action space, standard)
+        if cfg.get("env_key") == "pit":
+            eval_env = env_pit
+        elif cfg.get("optional_file") == "ppo_tyre.zip":
+            eval_env = env_tyre
+        else:
+            eval_env = env
 
         summary = run_episodes(
             env=eval_env,

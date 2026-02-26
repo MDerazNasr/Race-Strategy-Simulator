@@ -82,3 +82,36 @@ def make_env_tyre():
     env = F1Env(tyre_degradation=True)
     env = Monitor(env)
     return env
+
+
+def make_env_pit():
+    """
+    Creates a pit-stop environment instance for SB3 (Week 5 / d18+).
+
+    WHAT'S DIFFERENT vs make_env_tyre():
+      - F1Env(tyre_degradation=True, pit_stops=True) is used.
+      - Action space is 3D: [throttle, steer, pit_signal].
+        pit_signal > 0 → request a pit stop this step.
+      - Observation is still 12D (same as make_env_tyre).
+        The agent uses obs[11] = tyre_life to decide when to pit.
+      - Pitting costs PIT_PENALTY = -200 reward but resets tyre_life to 1.0.
+      - pit_cooldown = 100 steps prevents immediate re-pitting.
+
+    WHY TRAIN FROM SCRATCH (not continue from ppo_tyre)?
+      The action space changed: 2D → 3D.  PPO.load() reconstructs the
+      policy's action_net as Linear(128, 2).  There is no zero-padding trick
+      for action outputs — the new pit_signal output layer has no prior
+      weights to inherit.  We must build a new PPO with a 3D action_net.
+
+      The warm start comes from BC instead: expert demonstrations are
+      collected with include_pit=True, a BC policy is trained on 12D→3D,
+      and that policy initialises the PPO actor (same pipeline as d13).
+
+    OBSERVATION SPACE:  [0-11] same as make_env_tyre
+    ACTION SPACE:       [throttle, steer, pit_signal]
+
+    Used in: rl/train_ppo_pit.py (d18+)
+    """
+    env = F1Env(tyre_degradation=True, pit_stops=True)
+    env = Monitor(env)
+    return env

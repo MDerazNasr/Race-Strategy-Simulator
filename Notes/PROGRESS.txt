@@ -562,18 +562,78 @@ Bugs found and fixed:
      Fix: defaults 0.0; only F1Env(tyre_degradation=True) passes real values.
 
 ==============================================================================
-WHAT'S NEXT (suggested -- Week 5 continued)
+WEEK 5 (continued) -- PIT STOP MECHANIC (d18)
 ==============================================================================
 
-1. Evaluate ppo_tyre: does it conserve tyres? Does ep_len_mean recover?
-   Compare against v2 baseline. Key metric: tyre_life at end of episode.
+What was built:
+  env/f1_env.py          pit_stops=False param. When True (requires tyre_degradation=True):
+                         action_space = Box(3,): [throttle, steer, pit_signal]
+                         pit fires when pit_signal > 0 AND cooldown == 0
+                         pit effect: car.reset_tyres(), reward -= 200, cooldown = 100 steps
+                         info includes pit_count, pit_cooldown
+  expert/expert_driver.py  include_pit=False, pit_threshold=0.3 params.
+                         Returns 3D action when include_pit=True.
+                         pit_signal = +1.0 when tyre_life < threshold.
+  expert/collect_data.py  generate_dataset_pit(): 50 episodes, pit-aware expert.
+                         Saves bc/expert_data_pit.npz (12D obs, 3D actions).
+  rl/make_env.py         make_env_pit(): F1Env(tyre_degradation=True, pit_stops=True).
+  rl/train_ppo_pit.py    Full pipeline: collect data + BC + PPO with curriculum.
+                         1M steps. Saves rl/ppo_pit.zip.
+  rl/evaluate.py         Added PPO Pit Stops entry with pit env routing.
+  Notes/d18.txt          Full documentation including failure analysis.
 
-2. Pit stop mechanic (d18)
-   Add 3rd action dimension: pit_signal ∈ [-1, 1].  pit_signal > 0 → pit.
-   Pit effect: car.reset_tyres() + reward penalty (time cost).
-   Action space becomes Box(3,) — requires new BC training and curriculum.
-   The agent must discover WHEN to pit, not just how hard to push.
+Training arc:
+  Step 0:    ep_len_mean = 135,  ep_rew_mean = -36.3  (Stage 1)
+  Step 321k: ep_len_mean = 342,  ep_rew_mean = 254    (Stage 3)
+  Step 1M:   ep_len_mean = 1030, ep_rew_mean = 879    (Stage 3)
 
-3. Load transfer under braking (vehicle dynamics)
+Evaluation (fixed start, N=10):
+  Policy            Lap%   Reward  Speed(m/s)  LatErr(m)  Laps   Steps
+  -----------------------------------------------------------------------
+  Expert (rule)    100%    2909.1    17.10       0.797    11.0   2000
+  PPO v2 (3M)      100% <- 4531.7 <- 26.92 <-   0.678 <- 17.0   2000
+  PPO Tyre (5M)      0%    1643.5    16.09       2.375     8.0   1531
+  PPO Pit (6M)       0%     941.9    22.09       0.365 <-  3.0    568
+  -----------------------------------------------------------------------
+
+Key results:
+  PPO Pit has BEST lateral precision (0.365 m) — BC quality shines through.
+  PPO Pit drives FASTEST among non-v2 policies (22.09 m/s).
+  PPO Pit NEVER pits — pit_signal stays at -1.0 throughout all episodes.
+  PPO Pit crashes at 568 steps — aggressive speed + worn tyres = crash.
+
+THE PIT FAILURE IS A RICH ML LESSON
+=====================================
+Root cause 1 — BC Dataset Imbalance:
+  Only ~8 pit-positive samples out of 27,195 total (ratio 3,400:1).
+  MSE loss dominated by "no pit" class → pit_signal → -1.0 regardless of tyre_life.
+
+Root cause 2 — Sparse Reward + Discounting:
+  -200 pit cost is immediate. +400 expected gain is 1000 steps later.
+  With gamma=0.99, discounted future returns are near zero over 1000 steps.
+  Value function can't see the long-run benefit of pitting.
+
+Root cause 3 — Entropy too low for pit exploration:
+  By Stage 3, mean pit_signal ≈ -1.0, std ≈ 0.54.
+  P(pit_signal > 0) ≈ 0. PPO entropy insufficient to rediscover pitting.
+
+Fixes for d19:
+  1. Balanced BC dataset (filter to pit-successful episodes only)
+  2. gamma=0.9999 (longer discount horizon for 1000-step decisions)
+  3. Forced pit exploration in early curriculum
+
+==============================================================================
+WHAT'S NEXT (suggested -- Week 5 / d19)
+==============================================================================
+
+1. Pit Strategy v2 (d19): fix the three root causes identified above.
+   A. Balanced BC dataset — only include episodes where expert pits.
+   B. gamma=0.9999 — discount over 1000-step horizon.
+   C. Early curriculum with forced pitting to seed exploration.
+
+2. Multi-compound tyres: soft/medium/hard with different wear/grip tradeoffs.
+   Requires agent to choose compound at pit stop → deeper strategic complexity.
+
+3. Load transfer under braking (vehicle dynamics).
    DynamicCar doesn't shift weight between axles when braking.
    Implementing this makes braking physics more realistic.
