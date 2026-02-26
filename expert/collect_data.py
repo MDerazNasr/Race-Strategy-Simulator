@@ -193,6 +193,102 @@ def generate_dataset(
     else:
         print("Error: No data collected!")
 
+def generate_dataset_pit(
+    num_episodes=50,
+    max_steps=2000,
+    output_path="bc/expert_data_pit.npz",
+):
+    """
+    Collect expert demonstrations for the pit-stop environment (d18).
+
+    WHAT'S DIFFERENT vs generate_dataset():
+      - Environment: F1Env(tyre_degradation=True, pit_stops=True)
+          12D observation (adds tyre_life at index 11)
+          3D action space [throttle, steer, pit_signal]
+      - Expert: ExpertDriver(include_pit=True, pit_threshold=0.3)
+          Returns [throttle, steer, pit_signal] where:
+            pit_signal = 1.0  when tyre_life < 0.3 (pit request)
+            pit_signal = -1.0 otherwise (stay out)
+
+    NO ACTION NOISE ON PIT SIGNAL:
+      Throttle and steer get the usual Gaussian noise (std=0.05) for diversity.
+      pit_signal is NOT noised — it's a binary decision and noise would
+      create misleading half-hearted pit requests.  The BC network learns:
+        tyre_life < 0.3 → push pit_signal toward +1.0
+        tyre_life >= 0.3 → push pit_signal toward -1.0
+
+    WHAT THE AGENT LEARNS FROM THIS DATA:
+      The BC policy (12D obs → 3D actions) learns to:
+        1. Follow the track (same as standard BC).
+        2. Pit when tyre_life drops below 0.3 (new behavior).
+      This becomes the warm-start for PPO curriculum training, which then
+      refines the pitting strategy via RL reward signals.
+
+    Args:
+        num_episodes:  Number of expert episodes to collect.
+        max_steps:     Maximum steps per episode.
+        output_path:   Where to save the .npz dataset (relative to project root).
+
+    Saves: bc/expert_data_pit.npz with keys 'states' (N, 12) and 'actions' (N, 3).
+    """
+    all_states  = []
+    all_actions = []
+
+    env = F1Env(tyre_degradation=True, pit_stops=True)
+    expert = ExpertDriver(env.track, include_pit=True, pit_threshold=0.3)
+
+    print(f"Collecting pit-stop expert data from {num_episodes} episodes...")
+
+    for episode in range(num_episodes):
+        obs, info = env.reset()
+        ep_states  = []
+        ep_actions = []
+
+        for step in range(max_steps):
+            # Expert returns [throttle, steer, pit_signal]
+            expert_action = expert.get_action(env.car)
+
+            # Add noise to throttle and steer only — pit_signal is kept exact.
+            noisy_throttle = float(np.clip(expert_action[0] + np.random.normal(0, 0.05), -1.0, 1.0))
+            noisy_steer    = float(np.clip(expert_action[1] + np.random.normal(0, 0.05), -1.0, 1.0))
+            pit_signal     = float(expert_action[2])   # no noise on pit decision
+
+            action = np.array([noisy_throttle, noisy_steer, pit_signal], dtype=np.float32)
+
+            ep_states.append(obs.copy())
+            ep_actions.append(action)
+
+            # Also record extra samples near the track edge (same diversity trick as generate_dataset).
+            obs, reward, terminated, truncated, info = env.step(action)
+
+            if abs(obs[2]) > 0.6:   # lateral_error > 0.6 normalized
+                ep_states.append(obs.copy())
+                ep_actions.append(action)
+
+            if terminated or truncated:
+                print(f"  Episode {episode+1}/{num_episodes}: "
+                      f"{len(ep_states)} samples, "
+                      f"tyre_life={info['tyre_life']:.2f}, "
+                      f"pits={info['pit_count']}")
+                break
+
+        all_states.extend(ep_states)
+        all_actions.extend(ep_actions)
+
+    all_states  = np.array(all_states,  dtype=np.float32)
+    all_actions = np.array(all_actions, dtype=np.float32)
+
+    output_file = Path(project_root) / output_path
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(output_file, states=all_states, actions=all_actions)
+
+    print(f"\nSaved pit dataset to {output_file}")
+    print(f"  Total samples: {len(all_states)}")
+    print(f"  States shape:  {all_states.shape}   (expected: (N, 12))")
+    print(f"  Actions shape: {all_actions.shape}  (expected: (N, 3))")
+    return str(output_file)
+
+
 if __name__ == "__main__":
     run_expert_lap()
 

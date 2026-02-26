@@ -29,7 +29,7 @@ from rl.rewards import RacingReward
 class F1Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30} #info used for rendering
 
-    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False):
+    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False, pit_stops=False):
         super().__init__()
         self.dt = dt #dt = how much simulated time passes each step(). Same as in Car
         self.render_mode = render_mode #render_mode = you'll use this later if you draw stuff
@@ -74,6 +74,21 @@ class F1Env(gym.Env):
         #   policies working without modification.
         self.tyre_degradation = tyre_degradation
 
+        # ── Pit stop mode (Week 5 / d18) ──────────────────────────────────────
+        # Requires tyre_degradation=True (pit stops only make sense when tyres degrade).
+        # When True:
+        #   - Action space becomes 3D: [throttle, steer, pit_signal]
+        #     pit_signal ∈ [-1, 1]; fires a pit when > 0 and cooldown is 0.
+        #   - Pitting resets tyre_life to 1.0 (fresh tyres).
+        #   - A pit stop costs -200 reward (time lost in the pit lane).
+        #   - pit_cooldown prevents pitting again for 100 steps.
+        #     (At base wear 0.0003/step, tyres won't reach 30% in 100 steps.)
+        #   - Observation stays 12D (tyre_life tells the agent its state).
+        #     The agent infers cooldown from tyre_life = 1.0 after a pit.
+        assert not (pit_stops and not tyre_degradation), \
+            "pit_stops=True requires tyre_degradation=True"
+        self.pit_stops = pit_stops
+
         #Track
         self.track = generate_oval_track() #you generate a simple circular-ish track (list of (x,y) points)
 
@@ -92,11 +107,22 @@ class F1Env(gym.Env):
         else:
             self.car = DynamicCar()   # base_wear=0.0, slip_coef=0.0 (no degradation)
 
-        #Action: [throttle, steer_norm]
-        self.action_space = spaces.Box(
-            low = np.array([-1.0, -1.0], dtype=np.float32),
-            high = np.array([1.0, 1.0], dtype=np.float32),
-        )
+        # ── Action space ──────────────────────────────────────────────────────
+        # Standard: [throttle, steer_norm]
+        # With pit stops: [throttle, steer_norm, pit_signal]
+        #   pit_signal ∈ [-1, 1]; pit fires when pit_signal > 0 and cooldown = 0.
+        #   Using a continuous signal instead of discrete lets BC and PPO use
+        #   Gaussian distribution throughout — no architecture changes needed.
+        if self.pit_stops:
+            self.action_space = spaces.Box(
+                low  = np.array([-1.0, -1.0, -1.0], dtype=np.float32),
+                high = np.array([ 1.0,  1.0,  1.0], dtype=np.float32),
+            )
+        else:
+            self.action_space = spaces.Box(
+                low  = np.array([-1.0, -1.0], dtype=np.float32),
+                high = np.array([ 1.0,  1.0], dtype=np.float32),
+            )
 
         # ── Observations: 11D vector from get_obs() ─────────────────────
         '''
@@ -209,6 +235,20 @@ class F1Env(gym.Env):
         self._track_idx = 0          # current closest waypoint; updated by get_obs()
         self._prev_track_idx = 0     # previous step's waypoint; used for wrap detection
         self.laps_completed = 0      # cumulative laps completed this episode
+
+        # ── Pit stop state (d18) ──────────────────────────────────────────────
+        # pit_cooldown_remaining: steps until the next pit is allowed.
+        #   Set to 100 after each pit; decremented every step.
+        #   The agent cannot pit again until this reaches 0.
+        # pit_count: total pits taken this episode (for logging).
+        # PIT_PENALTY: reward deducted each time the agent pits.
+        #   -200 ≈ the cost of losing ~200 steps of progress reward.
+        #   The agent must judge: will fresh tyres earn more than 200 reward
+        #   before the episode ends? If yes, pit; if no, stay out.
+        self.pit_cooldown_remaining = 0
+        self.pit_count = 0
+        self.PIT_PENALTY = -200.0
+        self.PIT_COOLDOWN_STEPS = 100
     '''
     in RL your agent needs an observation vector each step: a compact summary of whats going on right now
 
@@ -340,6 +380,9 @@ class F1Env(gym.Env):
         self._prev_action = None  # clear previous action (no smoothness penalty on step 0)
         self._prev_obs = None     # clear previous obs
         self.laps_completed = 0   # reset lap counter for this episode
+        # Reset pit state at the start of each episode.
+        self.pit_cooldown_remaining = 0
+        self.pit_count = 0
 
         if options and options.get("fixed_start"):
             # ── Fixed start: waypoint 0, track-aligned, v=5 m/s ──────────────
@@ -409,7 +452,11 @@ class F1Env(gym.Env):
         self.step_count += 1
 
         # 1. Apply agent action to the car physics model.
-        throttle, steer = action
+        # Extract throttle and steer (always present).
+        # pit_signal is only present when pit_stops=True (3D action space).
+        throttle = float(action[0])
+        steer    = float(action[1])
+        pit_signal = float(action[2]) if self.pit_stops else -1.0
         self.car.step(throttle, steer, dt=self.dt)
 
         # 2. Compute observation from the new car state.
@@ -435,6 +482,33 @@ class F1Env(gym.Env):
             lap_bonus = 0.0
         self._prev_track_idx = curr_idx
 
+        # ── Pit stop logic (d18) ───────────────────────────────────────────────
+        # The agent signals a pit by setting pit_signal > 0 in the 3rd action dim.
+        # Conditions for a pit to fire:
+        #   1. pit_stops mode is active (env was created with pit_stops=True)
+        #   2. pit_signal > 0 (agent wants a pit)
+        #   3. pit_cooldown_remaining == 0 (not in cooldown from a recent pit)
+        #
+        # Pit effect:
+        #   - car.reset_tyres() restores tyre_life to 1.0 (full grip).
+        #   - PIT_PENALTY (-200) is deducted from this step's reward.
+        #     This is the "time lost in the pit lane."  The agent must judge:
+        #     will fresh tyres earn >200 reward before the episode ends?
+        #   - pit_cooldown_remaining = PIT_COOLDOWN_STEPS (100 steps).
+        #     Prevents immediate re-pitting.  At base wear 0.0003/step,
+        #     tyres won't reach 30% within 100 steps of a fresh pit.
+        #
+        # Each step: decrement cooldown by 1 (regardless of pit signal).
+        pit_reward = 0.0
+        if self.pit_stops and pit_signal > 0.0 and self.pit_cooldown_remaining == 0:
+            self.car.reset_tyres()
+            pit_reward = self.PIT_PENALTY
+            self.pit_cooldown_remaining = self.PIT_COOLDOWN_STEPS
+            self.pit_count += 1
+
+        if self.pit_cooldown_remaining > 0:
+            self.pit_cooldown_remaining -= 1
+
         # 3. Determine termination before computing reward, because the
         #    terminal penalty is baked into RacingReward.compute().
         lateral_error = obs[2]  # normalized: raw / 3.0, range ≈ [-1, 1]
@@ -454,18 +528,19 @@ class F1Env(gym.Env):
         reward = self.reward_fn.compute(
             obs=obs,
             prev_obs=self._prev_obs,
-            action=np.array(action, dtype=np.float32),
+            action=np.array(action[:2], dtype=np.float32),   # reward_fn uses [throttle, steer] only
             prev_action=self._prev_action,
             terminated=terminated,
-        ) + lap_bonus
+        ) + lap_bonus + pit_reward
         # lap_bonus is +100.0 exactly once per completed lap, 0.0 on all other steps.
-        # Added AFTER reward_fn so it doesn't interfere with shaped per-step terms.
-        # 100 >> max per-step reward (~1.1), so the agent is rewarded decisively
-        # for completing laps rather than just running many steps.
+        # pit_reward is PIT_PENALTY (-200) when a pit fires, 0.0 otherwise.
+        # Both are added AFTER reward_fn so they don't interfere with shaped terms.
+        # reward_fn receives action[:2] (throttle, steer) — it doesn't know about pit_signal.
 
         # 5. Store current obs/action for next step's smoothness penalty.
+        # _prev_action stores only [throttle, steer] — RacingReward uses those two.
         self._prev_obs    = obs
-        self._prev_action = np.array(action, dtype=np.float32)
+        self._prev_action = np.array(action[:2], dtype=np.float32)
 
         # 6. Extra debug info for logging / evaluation.
         info = {
@@ -487,6 +562,11 @@ class F1Env(gym.Env):
             # Only meaningful when tyre_degradation=True; always 1.0 otherwise
             # (DynamicCar.tyre_life starts at 1.0 and never degrades without reset_tyres).
             "tyre_life": float(getattr(self.car, 'tyre_life', 1.0)),
+            # Pit stop telemetry (d18) — only meaningful when pit_stops=True.
+            # pit_count: how many times the agent has pitted this episode.
+            # pit_cooldown: steps remaining until next pit allowed (0 = available).
+            "pit_count":    self.pit_count,
+            "pit_cooldown": self.pit_cooldown_remaining,
         }
         return obs, reward, terminated, truncated, info
 

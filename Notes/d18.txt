@@ -1,0 +1,358 @@
+d18 — Pit Stop Mechanic (Week 5, Day 18)
+========================================
+
+WHAT THIS DAY IS ABOUT
+=======================
+d18 introduces the first genuine RACE STRATEGY decision to the simulator:
+the pit stop.
+
+In real F1, a pit stop is a 2-3 second halt that exchanges worn tyres for
+fresh ones. The strategy team's job is to decide WHEN to pit — too early
+wastes the remaining grip in the current tyres; too late means running on
+degraded rubber that costs time every lap.
+
+In this simulator, the agent must learn the same trade-off:
+  - Drive harder → faster per step, but tyres wear faster → pit sooner.
+  - Drive conservative → slower per step, but tyres last longer → fewer pits.
+  - Optimal strategy: push hard on fresh tyres, pit at ~30% tyre_life,
+    push hard again on the new set.
+
+This is the first decision in this project that goes BEYOND driving
+physics — it requires temporal planning across the entire episode.
+
+
+DESIGN DECISIONS
+================
+
+1. ACTION SPACE EXTENSION: 2D → 3D
+------------------------------------
+Previous action: [throttle, steer]          shape (2,)
+New action:      [throttle, steer, pit_signal]   shape (3,)
+
+pit_signal ∈ [-1, 1]:
+  > 0.0 AND cooldown == 0  →  pit fires (tyre reset + penalty)
+  ≤ 0.0 OR cooldown > 0   →  no pit (action ignored)
+
+Why continuous instead of discrete?
+  PPO uses a Gaussian distribution over a continuous action space.
+  Adding a continuous pit_signal dimension requires zero architectural
+  changes — the same MLP, the same BC training, the same SB3 PPO code.
+  A discrete dimension would need a hybrid distribution (MultiDiscrete
+  or a mixed-head policy), which is significantly more complex.
+
+  The agent learns: "when tyre_life is low, push pit_signal toward +1."
+  In practice, a well-trained policy will output pit_signal ≈ +0.8
+  when it's time to pit and ≈ -0.9 when it isn't.
+
+2. PIT STOP EFFECT
+-------------------
+When pit fires:
+  a. car.reset_tyres() → tyre_life = 1.0, mu = mu_base (full grip)
+  b. reward += -200  (the time cost of a pit stop)
+  c. pit_cooldown_remaining = 100 steps
+
+The cooldown prevents the agent from pitting every step.
+At base wear rate (0.0003/step), tyres won't reach 30% within 100
+steps of a fresh pit — so the cooldown is never an obstacle for the
+correct strategy.
+
+Why -200?
+  At normal driving, fresh tyres earn ~0.9 reward/step vs worn tyres
+  (~0.3 tyre_life) earning ~0.5 reward/step.  Gain from fresh tyres:
+  ~0.4/step.  At step 1000 (half the 2000-step episode), there are
+  ~1000 steps remaining.  Expected gain: 0.4 × 1000 = 400 >> 200.
+  The pit IS worth it at step 1000.
+
+  At step 1800 (200 steps left), gain = 0.4 × 200 = 80 < 200.
+  The pit is NOT worth it late in the episode.
+
+  So -200 creates exactly the right incentive structure: pit early-mid
+  episode, not at the end.
+
+3. OBSERVATION STAYS 12D
+--------------------------
+The obs vector is unchanged from d17: 12D, with tyre_life at index 11.
+No new obs dimensions are added for the pit mechanic.
+
+Why not expose pit_cooldown in the obs?
+  The agent can infer cooldown from tyre_life:
+    tyre_life ≈ 1.0 → just pitted (probably in cooldown)
+    tyre_life < 0.3 → time to pit
+  The correlation is near-perfect because tyres don't reach 30% within
+  100 steps of a pit at any realistic driving pace.
+
+  Keeping the obs at 12D simplifies the network and maintains
+  compatibility with the d17 tyre_life training.
+
+4. WHY TRAIN FROM SCRATCH (NOT CONTINUE FROM ppo_tyre)
+---------------------------------------------------------
+ppo_tyre was trained with a 2D action space.  The policy's output layer
+is action_net = Linear(128, 2).  For the pit agent, we need
+action_net = Linear(128, 3).  There is no zero-padding trick for action
+OUTPUTS — unlike input padding (which just adds a zero-weight column),
+adding a new output unit creates a whole new row of weights with no
+prior meaning.
+
+We COULD pad the output layer and zero-init the pit_signal row, but:
+  - The pit_signal output would start at zero → policy never pits
+  - The policy would first need to un-learn "never pit" before learning
+    the actual pit strategy
+  - This cold-start on the pit dimension wastes time
+
+The BC warm-start approach is strictly better:
+  - Expert demonstrations immediately show WHEN to pit
+  - BC policy starts with correct pit_signal polarity from step 0
+  - PPO only needs to REFINE the timing, not discover it from scratch
+
+5. NEW BC PIPELINE
+-------------------
+Stage 1 — Data collection (generate_dataset_pit):
+  - F1Env(tyre_degradation=True, pit_stops=True)
+  - ExpertDriver(include_pit=True, pit_threshold=0.3)
+  - Expert pits when tyre_life < 0.3
+  - Noise added to throttle/steer (std=0.05) for diversity
+  - NO noise on pit_signal (binary decision must stay clean)
+  - 50 episodes → ~110-130k samples (12D obs, 3D actions)
+  - Saved to: bc/expert_data_pit.npz
+
+Stage 2 — BC training (train_bc):
+  - BCPolicy(state_dim=12, action_dim=3) auto-detected from data
+  - Same architecture: Linear(12,128) → ReLU → Linear(128,128) → ReLU → Linear(128,3) → Tanh
+  - 20 epochs, batch_size=256, lr=1e-3
+  - Saved to: bc/bc_policy_pit.pt
+
+6. CURRICULUM REUSE
+--------------------
+The same three-stage curriculum from d13 is reused unchanged:
+  Stage 1: Stability (max_accel=6, ~8 m/s cap)
+  Stage 2: Speed     (max_accel=11, ~15 m/s cap)
+  Stage 3: Racing    (max_accel=15, no cap)
+
+The curriculum callback modifies car.max_accel and reward_fn in-place.
+These changes are orthogonal to pit stops — the 3D action space works
+at all speeds.
+
+The agent learns to pit correctly at EACH stage:
+  Stage 1: Pit when tyre_life < 0.3 at slow speed
+  Stage 2: Refine timing at medium speed
+  Stage 3: Optimal pit timing at full race speed
+
+
+WHAT CHANGED IN EACH FILE
+==========================
+
+env/f1_env.py:
+  - Added pit_stops=False parameter to __init__
+  - When pit_stops=True: action_space = Box(3,) [throttle, steer, pit_signal]
+  - Added pit state: pit_cooldown_remaining, pit_count, PIT_PENALTY=-200, PIT_COOLDOWN_STEPS=100
+  - reset(): resets pit_cooldown_remaining=0, pit_count=0
+  - step(): extracts pit_signal from action[2] if pit_stops=True
+            fires pit when pit_signal > 0 and cooldown == 0
+            adds pit_reward to total reward
+            decrements cooldown each step
+  - info dict: added pit_count, pit_cooldown
+  - reward_fn receives action[:2] (throttle, steer only — pit_signal is irrelevant to driving reward)
+
+expert/expert_driver.py:
+  - Added include_pit=False, pit_threshold=0.3 to __init__
+  - get_action() returns 2D if include_pit=False (backward compatible)
+  - get_action() returns 3D [throttle, steer, pit_signal] if include_pit=True
+  - pit_signal = 1.0 when tyre_life < pit_threshold, -1.0 otherwise
+
+expert/collect_data.py:
+  - Added generate_dataset_pit() function
+  - Uses F1Env(tyre_degradation=True, pit_stops=True) and ExpertDriver(include_pit=True)
+  - Saves bc/expert_data_pit.npz with shapes (N, 12) and (N, 3)
+
+rl/make_env.py:
+  - Added make_env_pit() factory
+  - Returns F1Env(tyre_degradation=True, pit_stops=True) wrapped in Monitor
+
+rl/train_ppo_pit.py:  [NEW FILE]
+  - Full pipeline: collect data → train BC → PPO + curriculum
+  - 1M steps, same curriculum as d13
+  - Saves rl/ppo_pit.zip, logs to runs/ppo_pit/
+
+rl/evaluate.py:
+  - Added env_pit = F1Env(tyre_degradation=True, pit_stops=True)
+  - Added PPO Pit Stops entry (pink #FF4081, optional ppo_pit.zip)
+  - Routing: ppo_pit → env_pit, ppo_tyre → env_tyre, others → env
+
+
+EXPECTED AGENT BEHAVIOR AFTER TRAINING
+=======================================
+A well-trained pit agent should show:
+  - Pit count: 0-1 per 2000-step episode (1 pit at ~step 1000)
+  - Tyre_life at pit: ~0.3 (consistent with expert training signal)
+  - Total reward: higher than ppo_tyre (fresh-tyre advantage > pit cost)
+  - Lap completion rate: ≥ ppo_tyre (pit gives fresh grip for 2nd half)
+
+If the agent never pits:
+  → pit_signal weights converged to negative (BC warm-start failed or
+     PPO entropy drove it toward "safe" no-pit behavior)
+  → Try increasing ent_coef or checking BC training loss
+
+If the agent pits every step:
+  → pit_cooldown logic may have a bug, OR
+  → PIT_PENALTY is too small relative to the grip benefit
+  → Check that cooldown decrements correctly in step()
+
+If the agent pits at step 1900 (too late):
+  → Value function hasn't learned future gains from pitting
+  → May need more training steps or a higher discount factor (gamma)
+
+
+TRAINING LOG
+============
+Expert data collection:
+  50 episodes → 27,195 samples (12D obs, 3D actions)
+  ~8 episodes lasted long enough to pit (tyre_life < 0.3)
+  → ~8 pit-positive samples out of 27,195 total (class imbalance!)
+
+BC training:
+  BCPolicy(state_dim=12, action_dim=3)
+  20 epochs, batch_size=256, lr=1e-3
+  Final loss: ~0.0067  (driven mainly by throttle/steer, not pit signal)
+  Saved to: bc/bc_policy_pit.pt
+
+PPO curriculum training (1M steps):
+  Stage 1 (8 m/s):   ~150k steps, rolling_rate → 50% → graduated
+  Stage 2 (15 m/s):  ~150k steps, rolling_rate → 30% → graduated
+  Stage 3 (full):    ~700k steps, rolling_rate ~51%
+
+Training arc:
+  Step 0:     ep_len_mean = 135,  ep_rew_mean = -36.3
+  Step 321k:  ep_len_mean = 342,  ep_rew_mean = 254  (Stage 3 just started)
+  Step 1M:    ep_len_mean = 1030, ep_rew_mean = 879
+
+Pit behavior:
+  pit_signal output: always ≈ -1.0 (agent NEVER pits)
+  Root cause: see "What Went Wrong" section below.
+
+
+EVALUATION RESULTS
+==================
+Random Start (20 episodes):
+  Policy            Lap%  Reward   Speed   LatErr  Laps
+  PPO Tyre (5M+)    0%    714.0    10.4    1.808   3.65
+  PPO Pit (6M+)    20%    472.4    9.05    1.157   1.90
+
+Fixed Start (10 episodes):
+  Policy            Lap%  Reward   Speed   LatErr  Laps
+  PPO Tyre (5M+)    0%    1643.5   16.09   2.375   8.00
+  PPO Pit (6M+)     0%    941.9    22.09   0.365   3.00
+
+Key observations:
+  1. PPO Pit drives MUCH faster than PPO Tyre: 22.09 vs 16.09 m/s.
+     The curriculum trained a faster, more aggressive driver.
+     It never discovered the tyre conservation strategy that ppo_tyre found.
+
+  2. PPO Pit has the BEST lateral precision: 0.365 m — better than ALL
+     other policies including ppo_curriculum_v2 (0.678 m).
+     This comes from the BC training: the pit-aware expert demonstrations
+     produced a highly precise BC policy that the PPO inherited.
+
+  3. PPO Pit never pits: pit_signal ≈ -1.0 throughout all episodes.
+     Despite 1M steps of training, the RL never discovered pitting.
+
+  4. PPO Pit crashes earlier: 568 steps fixed start vs ppo_tyre's 1531.
+     Driving at 22 m/s with worn tyres → more lateral force → crashes sooner.
+
+Full evaluation table (Random Start):
+  Expert (rule-based)       45%   1295  10.1 m/s  1.31 m  4.95 laps
+  BC (imitation)            30%    856   8.1 m/s  1.38 m  3.30 laps
+  PPO + BC + Stable          0%    100  12.4 m/s  1.51 m  0.50 laps
+  PPO + BC + Curriculum      0%    157  15.3 m/s  1.18 m  0.70 laps
+  PPO + Curriculum v2 (3M)  70%   3079  19.6 m/s  0.86 m 11.70 laps ← BEST
+  PPO Multi-Lap (3M+)        0%    -14   7.7 m/s  1.56 m  0.10 laps
+  PPO Tyre Degradation (5M+) 0%    714  10.4 m/s  1.81 m  3.65 laps
+  PPO Pit Stops (6M+)       20%    472   9.1 m/s  1.16 m  1.90 laps
+
+
+WHAT WENT WRONG — WHY THE AGENT NEVER PITS
+===========================================
+This is the most important lesson from d18.
+
+ROOT CAUSE 1: BC Dataset Class Imbalance
+-----------------------------------------
+Out of 50 collected episodes, only ~8 lasted long enough for tyre_life
+to drop below 0.3 (the pit threshold).  The other 42 episodes were short
+crashes (10-15 steps) that ended before any tyre degradation occurred.
+
+Result: 27,195 total samples, but only ~8 with pit_signal = +1.0.
+  - Class balance: 27,187 "no pit" vs ~8 "pit" = ratio ~3,400:1
+  - MSE loss is dominated by the throttle/steer dimensions
+  - The pit_signal column converges to -1.0 (predicting majority class)
+  - After BC, pit_signal output ≈ -1.0 regardless of tyre_life
+
+This is the classic imbalanced classification problem in ML.  The model
+learns "always predict no-pit" and achieves near-zero loss on that column.
+
+ROOT CAUSE 2: Sparse Reward Signal in RL
+-----------------------------------------
+Even if BC had correctly initialized pit_signal, RL would struggle:
+
+  - The pit reward is SPARSE: the agent only collects -200 when it pits.
+    If it never pits (pit_signal always < 0), it never receives this signal.
+    PPO cannot compute a gradient for pit_signal because it never fires.
+
+  - In Stage 1 (8 m/s, ~135 steps): episodes are too short for
+    tyre_life to reach 0.3.  The agent never needs to pit.
+
+  - In Stage 3 (~1000 steps): tyre_life reaches 0.3 around step 1000.
+    But the expected gain from pitting (0.4/step × 1000 remaining = 400)
+    requires the VALUE FUNCTION to know 1000 steps ahead.
+    With gamma=0.99 and 1000 steps, discount factor = 0.99^1000 ≈ 4.3e-5.
+    The -200 pit cost at step 1000 has discount weight 1.0, while the
+    +400 future gain is discounted almost to zero.
+    → Discounting makes pitting look unprofitable even when it is!
+
+ROOT CAUSE 3: The 3D Action Space is Harder to Explore
+-------------------------------------------------------
+PPO explores by sampling from a 3D Gaussian: [throttle, steer, pit_signal].
+The pit_signal dimension has the same entropy as the other two.
+But the EFFECT of pit_signal is binary: < 0 = nothing, > 0 = pit.
+With std ≈ 0.54 (end of training) centered at -1.0, the probability
+of pit_signal > 0 is essentially zero (>1.85σ above mean).
+Once the policy commits to pit_signal ≈ -1.0, natural PPO entropy
+is insufficient to rediscover positive pit values.
+
+SOLUTIONS FOR d19+ (PIT STRATEGY v2)
+======================================
+1. Fix BC dataset imbalance:
+   - Only collect episodes that SUCCESSFULLY pit (filter out crash episodes)
+   - Or: collect 100% pit-positive episodes by resetting when tyre_life < 0.3
+   - Or: upsample pit-positive samples 100x in the BC loss computation
+
+2. Fix discounting horizon:
+   - Use gamma = 0.9999 instead of 0.99 (1000-step horizon)
+   - Or: add shaped reward for tyre conservation (bonus for low tyre_life)
+   - Or: use episodic return (gamma=1.0) for this long-horizon task
+
+3. Fix exploration:
+   - Use separate entropy bonus for pit_signal dimension
+   - Or: clamp pit_signal to [-0.5, 1.0] forcing the agent to explore pitting
+   - Or: use a separate Bernoulli head for pit (discrete decision)
+
+4. Simplified curriculum:
+   - Stage 0: Force the agent to pit every 500 steps (hard-coded) to learn
+     the grip recovery benefit, then release the constraint
+   - This gives the value function direct experience with tyre reset benefits
+
+Despite not discovering pit strategy, d18 demonstrates:
+  - The best lateral precision of any trained policy (0.365 m) from BC quality
+  - That sparse binary decisions (pit/no-pit) require special treatment beyond
+    standard PPO + BC initialization
+  - A clean implementation that is CORRECT — the pit fires properly when
+    pit_signal > 0, just the agent doesn't choose to fire it
+
+
+NEXT STEPS
+==========
+d19: Pit Strategy v2 — fix the three root causes identified above:
+  1. Balanced BC dataset (only pit-successful episodes)
+  2. Longer discount horizon (gamma → 0.9999)
+  3. Forced pit exploration curriculum (early episodes require pitting)
+
+Or: Multi-compound tyres (soft/medium/hard with different wear/grip tradeoffs)
+requiring the agent to choose which compound to pit onto.
