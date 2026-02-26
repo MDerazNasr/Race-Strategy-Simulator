@@ -608,6 +608,24 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_pit_v2.zip",
             "env_key":       "pit",   # routes to env_pit (3D action space)
         },
+        {
+            "name":          "PPO Pit Strategy v3 (d20)",
+            "color":         "#69F0AE",
+            # d20 closes the implementation gaps from d19:
+            #   Fix A: Weighted BC loss (pit_class_weight=1000).
+            #          Effective class ratio: 1:1 (was 1:1009 after d19 filtering).
+            #   Fix B: Zero-initialize pit output row after BC weight transfer.
+            #          P(pit_signal > 0) = 0.5 at start instead of ≈ 0.
+            #   Fix C: forced_pit_interval=50 (fires in every episode, even ep_len=50).
+            #          Gradual removal: 50 → 100 → 0 across Stages 0→1→2+.
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v3.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v3.zip",
+            "env_key":       "pit",   # routes to env_pit (3D action space)
+        },
     ]
 
     summaries = []

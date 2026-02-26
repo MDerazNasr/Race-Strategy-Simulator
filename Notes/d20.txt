@@ -1,0 +1,224 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  d20 — Pit Strategy v3: Closing the Implementation Gaps                     ║
+║  Week 5                                                                      ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+WHAT WAS BUILT
+==============
+A third pit-stop training attempt targeting the specific implementation gaps
+from d19, not just the conceptual root causes.
+
+New files:
+  rl/train_ppo_pit_v3.py     — d20 training pipeline
+  rl/ppo_pit_v3.zip          — trained model (catastrophically bad, documented below)
+  bc/bc_policy_pit_v3.pt     — BC policy trained with weighted loss
+
+Modified files:
+  bc/train_bc.py             — added pit_dim + pit_class_weight params
+                               weighted per-sample MSE for class imbalance
+  rl/bc_init_policy.py       — added zero_pit_signal_output() helper
+  rl/curriculum.py           — added STAGES_PIT_V3 with gradual forced-pit removal
+  rl/evaluate.py             — added PPO Pit Strategy v3 entry
+
+
+THREE FIXES IMPLEMENTED
+=======================
+
+Fix A — Weighted BC loss (bc/train_bc.py)
+-----------------------------------------
+Target: the real class imbalance — 86 pit-positive / 86,838 total (0.10%).
+The d19 "balanced dataset" strategy didn't fix within-episode imbalance.
+
+Implementation:
+  train_bc() now accepts pit_dim=2, pit_class_weight=1000.0.
+  Per-sample MSE computed via nn.MSELoss(reduction='none').
+  Pit-positive samples (action[2] > 0) are multiplied by pit_class_weight.
+
+  Effective gradient ratio:
+    86 × 1000 = 86,000 effective pit-positive gradient
+    86,752 × 1 = 86,752 effective pit-negative gradient
+    Ratio: ~1:1  (was 1:1009 with standard MSE)
+
+BC loss during training: 0.4 - 0.9 (higher than d19's 0.006 — expected
+because the 1000x weighting dominates the loss scale).
+
+Fix B — Zero-initialize pit_signal output row (rl/bc_init_policy.py)
+----------------------------------------------------------------------
+Target: BC output head may still initialise pit_signal near -1.0 even with
+weighted loss, because hidden layers associate "driving states" with "no pit".
+
+Implementation:
+  zero_pit_signal_output(ppo_model, pit_action_dim=2) zeros only the
+  pit_signal ROW of action_net.weight and action_net.bias AFTER verify_transfer.
+
+  Verified result at initialisation:
+    pit_signal ~ Gaussian(mean=0, std=1.000) → P(pit_signal > 0) = 0.500
+    Throttle/steer outputs: unchanged from BC transfer.
+
+Fix C — STAGES_PIT_V3 with forced_pit_interval=50 (rl/curriculum.py)
+----------------------------------------------------------------------
+Target: d19's interval=500 never fired (ep_len < 50 during Stage 0).
+Now interval=50 fires even in 50-step episodes.
+
+Implementation:
+  Stage 0: forced_pit_interval=50, grad_lap_rate=0.0, grad_window=50
+  Stage 1: forced_pit_interval=100, grad_lap_rate=0.5, grad_window=5
+  Stage 2: forced_pit_interval=0, grad_lap_rate=0.3, grad_window=5
+  Stage 3: forced_pit_interval=0, never graduates
+
+
+TRAINING LOG
+============
+Device: CPU
+BC training: weighted loss confirmed working (86 pit-positive upweighted 1000x).
+             Effective ratio: 86,000 vs 86,752 — approximately balanced.
+Weight transfer: confirmed exact (all max_diff = 0.00e+00).
+Zero-init: pit_signal std=1.000, P(pit>0)=0.500 at step 0.
+
+Curriculum progression:
+  Stage 0 (interval=50, ~100k steps):
+    ep_len_mean ≈ 30-40. Some episodes reach step 50 → forced pits fire.
+    Graduated after 50 rollouts (grad_lap_rate=0.0 — any rate passes).
+
+  Stage 1 (interval=100):
+    Steps 100k → 1,001,472 — NEVER graduated.
+    grad_lap_rate=0.5 required. rolling_rate stayed at 0 throughout.
+    ep_len_mean collapsed to 27-37 (WORSE than pre-training with BC weights!).
+    ep_rew_mean ≈ 1-8 (vs d18's 867-879 at the same timestep budget).
+
+  Stage 2, Stage 3: NEVER REACHED.
+
+Final training metrics:
+  ep_rew_mean = 8.43   (d18: 879, d19: 867 — ~100x worse)
+  ep_len_mean = 27.2   (d18: 1030, d19: 897 — ~36x worse)
+  Final stage: Stage 1 — Stability + Guided Pits (every 100 steps)
+
+
+D20 RESULT: CATASTROPHIC REGRESSION
+=====================================
+Post-training diagnostic (fixed start, deterministic):
+  Episode ended at step 7
+  pit_count = 0
+  pit_signal: mean=-1.000, std=0.000
+
+Evaluation (fixed start, N=10):
+  Policy                    Lap%   Reward   Speed   LatErr  Laps  Steps  Pits
+  ---------------------------------------------------------------------------
+  PPO Pit (d18)             0%     941.9   22.09    0.365m   3.0   568    0
+  PPO Pit v2 (d19)          0%     826.9   22.02    0.605m   3.0   468    0
+  PPO Pit v3 (d20)          0%     -17.9    9.80    1.357m   0.0     7    0
+  ---------------------------------------------------------------------------
+
+d20 is 100x worse than d18 and d19 on every metric.
+The agent crashes at step 7 (was step 468/568 before).
+The driving policy completely collapsed.
+
+
+WHY DID D20 FAIL SO BADLY: ROOT CAUSE ANALYSIS
+================================================
+Fix B (zero-init pit output row) caused a catastrophic chain reaction
+that completely destroyed the driving policy.
+
+The chain of events:
+
+Step 1: Zero-init gives P(pit_signal > 0) = 0.5 at every step.
+
+Step 2: Early episodes (tyre_life ≈ 0.99, fresh tyres):
+  - Agent randomly sends pit_signal > 0 at steps 5, 10, 15, etc.
+  - Pit fires at step ~5 (cooldown = 0, pit_signal > 0).
+  - Pit on fresh tyres: -200 penalty, zero benefit.
+  - Reward at step 5 ≈ -200 + small_progress ≈ -197.
+  - Episode reward is dominated by the -200 pit penalty.
+
+Step 3: PPO gradient update after first rollout:
+  "pit_signal > 0 → -200 reward. Suppress pit_signal."
+  Policy gradient pushes pit_signal → -∞ (tanh saturated at -1.0).
+  This happens in the first rollout, before the agent has seen ANY worn-tyre
+  situations. The gradient is: "pitting is ALWAYS bad, in ALL states."
+
+Step 4: Collateral damage to driving:
+  - The -200 penalties dominate the value function, making V(s) ≈ -200 for
+    all states. The value function is wildly miscalibrated.
+  - PPO uses V(s) to compute advantages. Miscalibrated values → noisy advantages.
+  - Noisy advantages → large policy gradient updates → driving policy degrades.
+  - ep_len collapses from 30 (at BC initialization) to 6-7 (after first rollout).
+  - The cycle: worse driving → fewer steps → fewer experiences → slower recovery.
+
+Step 5: The vicious cycle completes:
+  - Driver never reaches step 100 where forced pits fire (Fix C ineffective).
+  - BC driving knowledge lost. pit_signal collapsed to -1.0.
+  - Training is stuck in a catastrophically poor local minimum.
+
+WHY THE ANALOGY BREAKS DOWN:
+  In NLP transfer learning, zero-initializing a new classification head works
+  because the "wrong action" (wrong class prediction) costs little — just a
+  missed gradient update. The model can explore freely.
+
+  In RL: the wrong action (pit on fresh tyres) costs -200 reward, which
+  is ~100x larger than the per-step progress reward (~2). The first
+  random pit on fresh tyres permanently corrupts the training signal.
+
+  The fundamental constraint: pit exploration must happen AT THE RIGHT TIME
+  (worn tyres), not randomly. Random exploration is viable for throttle/steer
+  (bad driving = crash = small penalty). It is NOT viable for pit (random
+  pit = guaranteed -200 = catastrophic reward).
+
+
+D21 DESIGN: TYRE-LIFE-BASED FORCED PITS
+=========================================
+All failed attempts (d18-d20) forced/explored pits based on time or randomly.
+The actual optimal pit condition is STATE-BASED: tyre_life < threshold.
+
+The insight: we need CONDITIONAL forced pits, not UNCONDITIONAL.
+  Bad: "pit every 50 steps" → pits on fresh tyres → teaches "pitting bad"
+  Bad: "pit with P=0.5 randomly" → same problem
+  GOOD: "pit when tyre_life < 0.4" → pits on worn tyres → teaches "pitting good when worn"
+
+Proposed d21 architecture:
+
+  New env parameter: forced_pit_threshold (replaces forced_pit_interval)
+    In step(): if tyre_degradation and tyre_life < forced_pit_threshold → force pit
+    This is state-conditional, not time-conditional.
+
+  STAGES_PIT_V4:
+    Stage 0: forced_pit_threshold=0.4 (~100k steps)
+      → Every episode that reaches tyre_life=0.4 (~step 1000) forces a pit.
+      → Agent always experiences pitting at the RIGHT STATE (worn tyres).
+      → Value function learns: Q(s, pit | tyre_life=0.4) >> Q(s, no-pit).
+      → NO random fresh-tyre pitting. No catastrophic -200 penalties.
+
+    Stage 1: forced_pit_threshold=0.2 (lower, agent must pit 0.2-0.4 on its own)
+      → Agent semi-autonomous. Forced backup for deeply worn tyres.
+
+    Stage 2: forced_pit_threshold=0.0 (no forced pits — agent fully responsible)
+      → Value function bootstrapped with correct state-action associations.
+      → Agent should signal pit when tyre_life < 0.3.
+
+    Stage 3: forced_pit_threshold=0.0 (full racing)
+
+  Additional changes:
+    - REMOVE zero-init of pit output (Fix B from d20 — causes catastrophic harm)
+    - KEEP weighted BC loss (Fix A from d20 — correct in principle)
+    - KEEP gamma=0.9999 (from d19 — correct and necessary)
+    - Standard BC transfer for ALL output rows (same as d18/d19 before zero-init)
+
+  Why this should work:
+    - Forced pits happen ONLY when tyres are worn → no fresh-tyre pit penalty
+    - Value function sees: worn-tyre state → forced pit → tyre reset → more reward
+    - Agent associates "tyre_life < 0.3" with "pit is beneficial" (correct signal)
+    - As threshold drops from 0.4 → 0.2 → 0.0, agent takes over more of the pit decisions
+    - By Stage 2, value function knows Q(s_worn, pit) >> Q(s_worn, no-pit)
+    - BC driving quality preserved (no zero-init catastrophe)
+
+
+PROGRESSION SUMMARY (d18 → d20)
+=================================
+  d18: pit_signal from BC ≈ -1.0. gamma=0.99. interval=None. → pit_signal=-1.000
+  d19: interval=500 (never fired). gamma=0.9999. → pit_signal=-1.000
+  d20: interval=50 (fired sometimes). zero-init (P=0.5). → pit_signal=-1.000,
+       driving DESTROYED (reward=-17, crashes at step 7)
+
+  Core insight accumulated over 3 attempts:
+    Pit exploration must be TYRE-LIFE CONDITIONAL to avoid teaching
+    "pitting is always bad" from early random fresh-tyre pits.
+    Time-based forcing is insufficient. State-based forcing is required.

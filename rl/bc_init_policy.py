@@ -243,6 +243,59 @@ def extend_obs_dim(model, old_dim: int, new_dim: int) -> None:
     )
 
 
+def zero_pit_signal_output(ppo_model, pit_action_dim: int = 2) -> None:
+    """
+    Zero-initialize the pit_signal output row of the PPO action_net (d20 Fix B).
+
+    WHY THIS IS NEEDED:
+    ===================
+    d18 and d19 both suffered from the same problem: the BC policy initialises
+    pit_signal close to -1.0 because:
+      - Standard BC MSE is dominated by the 99.9% no-pit class → BC pushes
+        all action outputs toward the mean of the training data ≈ -1.0.
+      - Even with pit_class_weight=1000 (d20 Fix A), the BC hidden layers
+        learn to associate "driving inputs" with "no pit output" — this is
+        correct for most of the episode, but the output head weight for
+        pit_signal starts biased toward the majority class direction.
+
+    THE FIX:
+      After transferring BC weights, zero the pit_signal row of action_net.
+      This decouples pit_signal from the BC prior entirely:
+        - Hidden layers [0] and [2]: PRESERVED from BC → good driving features
+        - Throttle/steer rows of action_net: PRESERVED from BC → good driving
+        - Pit_signal row of action_net: ZEROED → starts at N(0, σ), P(pit)=0.5
+
+      With the zeroed pit row:
+        - At initialisation, pit_signal ~ Gaussian(0, σ) where σ = exp(log_std_init)
+        - P(pit_signal > 0) = 0.5 → MAXIMUM pit exploration
+        - The BC driving knowledge is preserved in throttle/steer
+        - The value function (bootstrapped by forced pits) teaches the agent
+          when to set pit_signal > 0 vs < 0
+
+      This is analogous to pre-training a language model and fine-tuning only
+      the task-specific classification head from scratch while keeping the
+      encoder frozen (except we don't freeze here — PPO updates all weights).
+
+    CALL ORDER:
+      1. load_bc_weights_into_ppo()  → transfers ALL weights (including pit row)
+      2. verify_transfer()           → confirms transfer was correct
+      3. zero_pit_signal_output()    → zeros pit row (AFTER verification)
+
+    Args:
+        ppo_model:     An instantiated SB3 PPO model with 3D action space.
+        pit_action_dim: Index of pit_signal in the 3D action vector. Default=2.
+    """
+    with torch.no_grad():
+        ppo_model.policy.action_net.weight.data[pit_action_dim].zero_()
+        ppo_model.policy.action_net.bias.data[pit_action_dim] = 0.0
+
+    log_std = ppo_model.policy.log_std.data[pit_action_dim].item()
+    std = torch.exp(torch.tensor(log_std)).item()
+    print(f"[BC Init] Zero-initialized pit_signal output (action dim {pit_action_dim}).")
+    print(f"          pit_signal now: Gaussian(mean=0, std={std:.3f}) → P(pit>0) = 0.500")
+    print(f"          Throttle/steer outputs: unchanged from BC transfer.")
+
+
 def verify_transfer(ppo_model, bc_path: str, device: str) -> None:
     """
     Sanity check: verifies the weight transfer was exact.
