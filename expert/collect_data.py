@@ -289,6 +289,121 @@ def generate_dataset_pit(
     return str(output_file)
 
 
+def generate_dataset_pit_v2(
+    num_pit_episodes=50,
+    max_steps=2000,
+    output_path="bc/expert_data_pit_v2.npz",
+):
+    """
+    Balanced pit-stop BC dataset (d19 Fix 1).
+
+    THE PROBLEM WITH generate_dataset_pit() (d18):
+      d18 collected all 50 episodes regardless of whether a pit fired.
+      The expert pits when tyre_life < 0.3, which happens at ~step 1000.
+      Many episodes CRASHED before step 1000 (particularly at high speed
+      with fresh tyres in Stage 1 corners), so they contribute ZERO pit
+      data but lots of "stay out" data.
+      Result: ~27k samples, only ~8 pit-positive (ratio 3,400:1).
+      BC training (MSE loss) ignores the minority class → policy initialised
+      with pit_signal = -1.0 always → PPO inherits a no-pit prior.
+
+    THE FIX:
+      Only keep episodes where at least 1 pit actually fired
+      (info["pit_count"] >= 1 at episode end).
+      Run episodes until we have `num_pit_episodes` pit-containing episodes.
+      Discard crashes-before-pit episodes.
+
+      Expected outcome:
+        - Every episode contains exactly 1 pit (at ~step 1000).
+        - Pit-positive samples: ~1000 per episode (steps 970–1000 where
+          tyre_life < 0.3, expert signals pit=+1).
+        - Pit-positive fraction: ~1000/2000 = 5% (vs 0.03% in d18).
+        - BC loss now has a meaningful gradient from pit-positive samples.
+
+    WHAT THE BALANCED POLICY LEARNS:
+      - Follow the track (throttle/steer from the 2000-step episode).
+      - When tyre_life < 0.3, push pit_signal → +1.0 (not suppressed by
+        class imbalance anymore).
+
+    Args:
+        num_pit_episodes: Number of KEPT episodes (must each have >=1 pit).
+        max_steps:        Maximum steps per episode.
+        output_path:      Where to save the .npz (relative to project root).
+
+    Saves: bc/expert_data_pit_v2.npz with keys 'states' (N,12) and 'actions' (N,3).
+    """
+    all_states  = []
+    all_actions = []
+
+    env    = F1Env(tyre_degradation=True, pit_stops=True)
+    expert = ExpertDriver(env.track, include_pit=True, pit_threshold=0.3)
+
+    episodes_kept   = 0
+    episodes_run    = 0
+
+    print(f"Collecting balanced pit dataset (need {num_pit_episodes} pit episodes)...")
+
+    while episodes_kept < num_pit_episodes:
+        obs, info = env.reset()
+        ep_states  = []
+        ep_actions = []
+
+        for step in range(max_steps):
+            expert_action = expert.get_action(env.car)
+
+            noisy_throttle = float(np.clip(expert_action[0] + np.random.normal(0, 0.05), -1.0, 1.0))
+            noisy_steer    = float(np.clip(expert_action[1] + np.random.normal(0, 0.05), -1.0, 1.0))
+            pit_signal     = float(expert_action[2])   # no noise on pit decision
+
+            action = np.array([noisy_throttle, noisy_steer, pit_signal], dtype=np.float32)
+
+            ep_states.append(obs.copy())
+            ep_actions.append(action)
+
+            obs, reward, terminated, truncated, info = env.step(action)
+
+            if abs(obs[2]) > 0.6:
+                ep_states.append(obs.copy())
+                ep_actions.append(action)
+
+            if terminated or truncated:
+                break
+
+        episodes_run += 1
+        pit_count = info.get("pit_count", 0)
+
+        if pit_count >= 1:
+            all_states.extend(ep_states)
+            all_actions.extend(ep_actions)
+            episodes_kept += 1
+            kept_label = "KEPT"
+        else:
+            kept_label = "DISCARDED (no pit — crashed before tyre_life<0.3)"
+
+        print(f"  Episode {episodes_run:3d}: {len(ep_states):5d} samples, "
+              f"pit_count={pit_count}, tyre_life={info.get('tyre_life', 0):.2f}  "
+              f"[{episodes_kept}/{num_pit_episodes} kept] {kept_label}")
+
+    all_states  = np.array(all_states,  dtype=np.float32)
+    all_actions = np.array(all_actions, dtype=np.float32)
+
+    pit_positive = int(np.sum(all_actions[:, 2] > 0))
+    pit_fraction = 100.0 * pit_positive / max(len(all_states), 1)
+
+    output_file = Path(project_root) / output_path
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(output_file, states=all_states, actions=all_actions)
+
+    print(f"\nSaved balanced pit dataset to {output_file}")
+    print(f"  Episodes kept / run: {episodes_kept} / {episodes_run}  "
+          f"(kept {100.0*episodes_kept/episodes_run:.1f}%)")
+    print(f"  Total samples:       {len(all_states)}")
+    print(f"  Pit-positive:        {pit_positive} / {len(all_states)}  ({pit_fraction:.2f}%)")
+    print(f"  States shape:        {all_states.shape}   (expected: (N, 12))")
+    print(f"  Actions shape:       {all_actions.shape}  (expected: (N, 3))")
+    return str(output_file)
+
+
 if __name__ == "__main__":
     run_expert_lap()
 

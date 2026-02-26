@@ -623,13 +623,83 @@ Fixes for d19:
   3. Forced pit exploration in early curriculum
 
 ==============================================================================
-WHAT'S NEXT (suggested -- Week 5 / d19)
+WEEK 5 / d19 — Pit Strategy v2: Fixing Root Causes (STILL FAILING)
 ==============================================================================
 
-1. Pit Strategy v2 (d19): fix the three root causes identified above.
-   A. Balanced BC dataset — only include episodes where expert pits.
-   B. gamma=0.9999 — discount over 1000-step horizon.
-   C. Early curriculum with forced pitting to seed exploration.
+What was built:
+  Three fixes to d18's pit-non-discovery failure, plus new Stage 0 curriculum.
+
+New / modified files:
+  env/f1_env.py          Added forced_pit_interval param (0=disabled, N=force pit every N steps)
+  rl/curriculum.py       Added forced_pit_interval to CurriculumStage + new STAGES_PIT_V2
+  expert/collect_data.py Added generate_dataset_pit_v2() — only keeps episodes with ≥1 pit
+  rl/train_ppo_pit_v2.py Full d19 pipeline (balanced BC + gamma=0.9999 + STAGES_PIT_V2)
+  rl/evaluate.py         Added PPO Pit Strategy v2 entry
+  Notes/d19.txt          Full documentation including root cause re-analysis
+
+Three fixes implemented:
+  Fix 1 — Balanced BC dataset (generate_dataset_pit_v2):
+    Only keep episodes where pit_count ≥ 1.
+    Result: 86 pit-positive / 86,838 total = 0.10% (vs d18's 0.03%).
+    Still imbalanced: within each kept episode, pit fires for only 1-2 steps.
+
+  Fix 2 — gamma=0.9999:
+    0.9999^1000 ≈ 0.905. Value function now sees 90% of pit payoff.
+    Implemented correctly. Necessary but not sufficient.
+
+  Fix 3 — Forced pit Stage 0:
+    forced_pit_interval=500 in Stage 0 (runs ~100k steps).
+    FAILED: ep_len_mean was 46-50 during Stage 0 → forced pits never fired.
+    The agent crashed before step 500 in every episode during Stage 0.
+
+Training arc:
+  Stage 0: ~100k steps, ep_len ≈ 46-50  (forced pits NEVER triggered)
+  Stage 1: graduated quickly             (any survival rate passes)
+  Stage 2: graduated at 30% lap rate
+  Stage 3: 375k → 1M steps, final ep_rew_mean=867, ep_len_mean=897
+
+Evaluation (fixed start, N=10):
+  Policy                    Lap%   Reward  Speed(m/s)  LatErr(m)  Laps  Steps  Pits
+  -----------------------------------------------------------------------------------
+  Expert (rule)            100%    2909.1    17.10       0.797    11.0   2000    1
+  BC (imitation)           100%    2909.1    17.03       0.756    11.0   2000    1
+  PPO v2 (3M)              100%    4531.7    26.92       0.678    17.0   2000    0
+  PPO Tyre (5M)              0%    1643.5    16.09       2.375     8.0   1531    0
+  PPO Pit (d18)              0%     941.9    22.09       0.365     3.0    568    0
+  PPO Pit v2 (d19)           0%     826.9    22.02       0.605     3.0    468    0
+  -----------------------------------------------------------------------------------
+
+d19 vs d18: reward -12%, lateral error +66%, 100 fewer steps. Slightly worse.
+BOTH agents never pit. pit_signal = -1.000, std = 0.000 in both cases.
+
+Updated root cause analysis:
+  Root cause A — BC class imbalance REMAINS unsolved:
+    0.10% pit-positive is still essentially zero for MSE learning.
+    The balanced-episode strategy doesn't fix within-episode imbalance.
+    Fix for d20: WEIGHTED BC LOSS — weight pit-positive samples by 1000×.
+
+  Root cause B — Stage 0 forced pits never fired:
+    forced_pit_interval=500 was too large for Stage 0 episode lengths.
+    Fix for d20: forced_pit_interval=50 (fires even in 50-step episodes).
+    Keep forced pits in Stages 1+2 with interval=200 as well.
+
+  Root cause C — Entropy collapse on pit dimension:
+    Despite ent_coef=0.01 (doubled), std(pit_signal) collapsed to 0.000.
+    Entropy bonus applies equally to all dims; pit_signal still collapses.
+    Fix for d20: DISCRETE pit action (binary Bernoulli head).
+    Bernoulli probability never collapses to exactly 0 or 1.
+
+==============================================================================
+WHAT'S NEXT (suggested -- d20)
+==============================================================================
+
+1. Pit Strategy v3 (d20): fix the three NEW root causes identified in d19:
+   A. Weighted BC loss: weight pit-positive samples 1000× in MSE loss.
+      → BC policy actually learns pit_signal > 0 when tyre_life < 0.3.
+   B. Smaller forced_pit_interval: 50 steps (not 500) so short episodes see pits.
+      Keep forced pits in Stages 0-2 (not just Stage 0).
+   C. Discrete pit action: binary {0=stay, 1=pit} Bernoulli head.
+      No entropy collapse. No Gaussian degeneration.
 
 2. Multi-compound tyres: soft/medium/hard with different wear/grip tradeoffs.
    Requires agent to choose compound at pit stop → deeper strategic complexity.
