@@ -98,13 +98,42 @@ def train_bc(
     num_epochs=20, #how many times you loop through the dataset
     batch_size=256, #how many samples per gradient step
     learning_rate=1e-3, #step size for optimizer
-    device=None, #cpu/gpu choice 
+    device=None, #cpu/gpu choice
     save_path="bc/bc_policy.pt", #where to save weights
+    pit_dim=None,          # action dimension index for pit signal (None = no weighting)
+    pit_class_weight=1.0,  # weight multiplier for pit-positive samples (d20 Fix A)
 ):
+    """
+    Train a BC policy via supervised imitation learning.
+
+    Standard usage (d1-d19): no weighting, MSE loss over all samples equally.
+
+    Pit-weighted usage (d20 Fix A):
+      The pit-stop dataset has extreme class imbalance: ~0.10% pit-positive
+      samples. Standard MSE ignores the minority class — the gradient signal
+      from 86 pit-positive samples is diluted by 86,752 pit-negative samples.
+
+      Setting pit_dim=2 and pit_class_weight=1000 upweights pit-positive
+      samples 1000x, making their gradient contribution equivalent to 86,000
+      samples. This gives approximately balanced learning:
+        Effective pit-positive:  86 × 1000 = 86,000
+        Effective pit-negative:  86,752 × 1 = 86,752
+        Ratio:                   ~1:1  (was 1:1009 before weighting)
+
+      The BC network now receives a meaningful gradient from pit-positive
+      samples and should learn: tyre_life < 0.3 → pit_signal → +1.0.
+
+    Args:
+        pit_dim:          Index of pit_signal in the action vector (e.g. 2 for [throttle,steer,pit]).
+                          None = backward-compatible mode, no weighting.
+        pit_class_weight: Multiplier for pit-positive sample losses.
+                          1.0 = uniform (standard BC).
+                          1000.0 = 1000x upweight for pit-positive (d20).
+    """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Using device:", device)
-    
+
     #create dataset and dataloader
     dataset = ExpertDataset(npz_path)
     dataloader = DataLoader(
@@ -120,8 +149,20 @@ def train_bc(
     policy = BCPolicy(state_dim=state_dim, action_dim=action_dim).to(device) #creates the network and moves it cpu/gpu
 
     #optimiser and loss
-    optimizer = optim.Adam(policy.parameters(), lr=learning_rate, weight_decay=1e-4) #adam optimizer updates weights to reduce loss, lr is learning rate.
-    criterion = nn.MSELoss() #mean squared error loss -> compares predicted action v expert action
+    optimizer = optim.Adam(policy.parameters(), lr=learning_rate, weight_decay=1e-4)
+    # Use reduction='none' so we can apply per-sample weights before averaging.
+    # For standard BC (pit_dim=None), this is mathematically identical to MSELoss().
+    criterion = nn.MSELoss(reduction='none')
+
+    # Log whether pit weighting is active
+    use_pit_weight = (pit_dim is not None and pit_class_weight > 1.0)
+    if use_pit_weight:
+        pit_positive_count = int((dataset.actions[:, pit_dim] > 0).sum())
+        print(f"[BC] Pit-weighted training: pit_dim={pit_dim}, weight={pit_class_weight}x")
+        print(f"     Pit-positive samples: {pit_positive_count} / {len(dataset)} "
+              f"({100*pit_positive_count/len(dataset):.2f}%)")
+        print(f"     Effective ratio after weighting: "
+              f"{pit_positive_count*pit_class_weight:.0f} vs {len(dataset)-pit_positive_count}")
 
     #Training loop (core learning)
     for epoch in range(num_epochs):
@@ -135,10 +176,25 @@ def train_bc(
 
             #forward pass
             pred_actions = policy(batch_states)
-            #loss computation
-            mse_loss = criterion(pred_actions, batch_actions)
+
+            # Per-element MSE loss: shape (batch_size, action_dim)
+            per_elem_loss = criterion(pred_actions, batch_actions)
+            # Average over action dimensions -> per-sample loss: shape (batch_size,)
+            per_sample_loss = per_elem_loss.mean(dim=1)
+
+            # Apply pit class weighting if configured (d20 Fix A).
+            # pit-positive samples (where action[pit_dim] > 0) are upweighted.
+            # This counteracts the 1:1009 class imbalance in the pit dataset.
+            if use_pit_weight:
+                pit_positive = (batch_actions[:, pit_dim] > 0).float()
+                # Weight = 1.0 for non-pit samples, pit_class_weight for pit samples
+                sample_weights = 1.0 + (pit_class_weight - 1.0) * pit_positive
+                per_sample_loss = per_sample_loss * sample_weights
+
+            mse_loss = per_sample_loss.mean()
             action_penalty = 0.01 * torch.mean(pred_actions ** 2)
             loss = mse_loss + action_penalty
+
             #backward pass, clears old gradients, imp because pytorch accumulates gradients by default
             loss.backward() #backpropogation loss for all weight
             optimizer.step() #adam updates parametres using gardients
@@ -154,7 +210,7 @@ def train_bc(
     #save trained model
     torch.save(policy.state_dict(), save_path)
     print(f"Saved BC policy to {save_path}")
-    
+
     return policy, save_path
 
 if __name__ == "__main__":

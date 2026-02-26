@@ -303,6 +303,144 @@ STAGES_PIT_V2: List[CurriculumStage] = [
 
 
 # =============================================================================
+# PIT STRATEGY V3 CURRICULUM  (d20)
+# =============================================================================
+#
+# PROBLEM (d19 post-mortem):
+#   d19's three fixes were correct in design but had two implementation gaps:
+#
+#   Gap 1 — Stage 0 forced pits never fired:
+#     forced_pit_interval=500 requires ep_len > 500.
+#     During Stage 0, ep_len ≈ 46-50.  Agent crashed before step 500.
+#     The value function NEVER saw a pit experience in Stage 0.
+#     Fix: use interval=50 → fires even in 50-step episodes (at step 50).
+#
+#   Gap 2 — BC still initialises pit_signal ≈ -1.0 (before weight transfer):
+#     Even with pit_class_weight=1000 in BC training, the BC hidden layers
+#     learn to associate driving-state features with "no-pit" because 99.9%
+#     of the training data is no-pit.  The BC output head for pit_signal
+#     still starts biased toward -1.0 after transfer.
+#     Fix: zero_pit_signal_output() zeros the pit row of action_net AFTER
+#     BC weight transfer, giving P(pit_signal > 0) = 0.5 at initialisation.
+#
+# THE GRADUAL REMOVAL SCHEDULE:
+#   The key insight: forced pits help the value function but HURT the policy
+#   if kept too long.  If the env always pits for the agent, the agent never
+#   has to learn WHEN to send pit_signal > 0.
+#
+#   Stage 0 (50-step interval, ~100k steps):
+#     Fires a pit every 50 steps.  Even in 50-step episodes, the very first
+#     episode sees a forced pit at step 50.  Value function immediately learns:
+#       Q(s_50, any_action) gets a tyre reset → more reward → Q increases.
+#     The pit row (zero-initialised) starts at P(pit)=0.5 and receives gradient.
+#
+#   Stage 1 (100-step interval):
+#     Forced pits still active but half as frequent.  The agent has to cover
+#     the gaps between forced pits on its own.  Pit_signal gradient from
+#     bootstrapped value function starts pulling pit_signal toward +1 at the
+#     right times.
+#
+#   Stage 2 (no forced pits):
+#     Agent fully responsible for pit decisions.  By now, the value function
+#     knows Q(s, pit_signal>0) >> Q(s, pit_signal<0) when tyre_life is low.
+#     The policy has been getting gradient signal from ~200k steps of forced
+#     pit experiences.
+#
+#   Stage 3 (no forced pits, full speed):
+#     Racing pace with learned pit strategy.  Agent should now pit at ~step
+#     1000 when tyre_life approaches 0.3.
+#
+STAGES_PIT_V3: List[CurriculumStage] = [
+
+    # -- Stage 0: Forced pit every 50 steps (fires in short early episodes) --
+    # Goal: bootstrap value function with guaranteed pit experiences from step 1.
+    #
+    # WHY interval=50:
+    #   In d19, interval=500 never fired because ep_len ≈ 46-50.
+    #   interval=50 fires at step 50, 100, 150, ... ensuring that even
+    #   episodes ending at step 50 see exactly one forced pit (at step 50).
+    #   The value function immediately learns: "pitting at step 50 → tyre
+    #   reset → grip restored → more future reward per step."
+    #
+    # Graduation: same as STAGES_PIT_V2 Stage 0 — after 50 rollouts.
+    CurriculumStage(
+        name                = "Stage 0 -- Forced Pit Bootstrap (every 50 steps)",
+        max_accel           = 6.0,
+        forced_pit_interval = 50,    # fires at step 50, 100, 150, ...
+        reward_kwargs       = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.0,
+            lateral_weight    = 1.0,
+            heading_weight    = 0.2,
+            smoothness_weight = 0.1,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 0.0,   # graduate after filling the window
+        grad_window   = 50,    # 50 rollouts × 2048 ≈ 100k steps
+    ),
+
+    # -- Stage 1: Forced pit every 100 steps (half frequency) ----------------
+    # Goal: gradually reduce training wheels while keeping pit experiences.
+    # Agent must pit on its own between forced pits.  The pit_signal row,
+    # initialized at 0 (P=0.5), now has ~100k steps of value-function
+    # gradient pushing it toward the right decisions.
+    CurriculumStage(
+        name                = "Stage 1 -- Stability + Guided Pits (every 100 steps)",
+        max_accel           = 6.0,
+        forced_pit_interval = 100,   # fires at step 100, 200, ...
+        reward_kwargs       = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.0,
+            lateral_weight    = 1.0,
+            heading_weight    = 0.2,
+            smoothness_weight = 0.1,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 0.5,
+        grad_window   = 5,
+    ),
+
+    # -- Stage 2: No forced pits, speed unlocked, agent must pit itself -------
+    # Goal: full autonomous pit strategy at medium speed.
+    # Forced pits are removed.  The agent must set pit_signal > 0 on its own.
+    # Value function (bootstrapped) knows Q(s,pit) when tyre is worn.
+    # Policy (zero-initialized pit row) has had ~200k steps of gradient signal.
+    CurriculumStage(
+        name                = "Stage 2 -- Speed, Agent Pits Autonomously",
+        max_accel           = 11.0,
+        forced_pit_interval = 0,     # agent alone decides pits from here
+        reward_kwargs       = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.1,
+            lateral_weight    = 0.5,
+            heading_weight    = 0.1,
+            smoothness_weight = 0.05,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 0.3,
+        grad_window   = 5,
+    ),
+
+    # -- Stage 3: Full racing pace, autonomous pit strategy -------------------
+    CurriculumStage(
+        name                = "Stage 3 -- Full Racing + Pit Strategy",
+        max_accel           = 15.0,
+        forced_pit_interval = 0,
+        reward_kwargs       = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.1,
+            lateral_weight    = 0.5,
+            heading_weight    = 0.1,
+            smoothness_weight = 0.05,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 1.1,   # never graduates
+        grad_window   = 9999,
+    ),
+]
+
+
+# =============================================================================
 # CURRICULUM CALLBACK
 # =============================================================================
 
