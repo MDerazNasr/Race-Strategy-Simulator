@@ -103,7 +103,8 @@ class CurriculumStage:
     reward_kwargs:       Dict   = field(default_factory=dict)
     grad_lap_rate:       float  = 0.4
     grad_window:         int    = 5
-    forced_pit_interval: int    = 0   # d19: 0 = disabled (default)
+    forced_pit_interval:  int   = 0    # d19: 0 = disabled (default)
+    forced_pit_threshold: float = 0.0  # d21: 0.0 = disabled (default)
 
 
 # =============================================================================
@@ -441,6 +442,149 @@ STAGES_PIT_V3: List[CurriculumStage] = [
 
 
 # =============================================================================
+# PIT STRATEGY V4 CURRICULUM  (d21)
+# =============================================================================
+#
+# PROBLEM (d20 catastrophe — root cause):
+#   All previous forced-pit schemes were TIME-BASED: force pit at step 50, 500.
+#   This is unconditional — it fires regardless of tyre state.
+#
+#   d20 (interval=50): fired at step 50 → tyre_life ≈ 0.97 (nearly fresh).
+#     → -200 pit penalty on fresh tyres → PPO learns "pitting always bad"
+#     → pit_signal collapsed to -1.000 in first rollout
+#     → driving destroyed (reward=-17.9, crashes at step 7)
+#
+#   Root insight: pit exploration must be STATE-CONDITIONAL.
+#     Bad: "pit every 50 steps" → pits on fresh tyres → "pitting bad"
+#     GOOD: "pit when tyre_life < 0.35" → pits on worn tyres → "pitting good when worn"
+#
+# THE D21 FIX — STATE-CONDITIONAL FORCED PITS:
+#   forced_pit_threshold replaces forced_pit_interval for d21.
+#   When tyre_life < threshold, env forces a pit (if not in cooldown).
+#   Timing with ppo_tyre start (survives ~1500 steps):
+#     tyre_life < 0.35 at ~step 929 — guaranteed to fire in every episode.
+#     Forced pits ONLY happen on worn tyres → CORRECT training signal.
+#     Value function learns: Q(s_worn, pit) >> Q(s_worn, no-pit).
+#
+# D21 ALSO:
+#   - Starts from ppo_tyre weights (12D obs, 1500-step survival)
+#     rather than from scratch or BC.
+#   - load_ppo_tyre_into_ppo_pit() extends 2D action → 3D action:
+#       action_net rows [0,1] from ppo_tyre (throttle/steer, preserved)
+#       action_net row  [2] from bc_policy_pit_v3 (pit, weighted BC)
+#   - REMOVES zero-init (d20 Fix B — catastrophic harm confirmed)
+#   - KEEPS gamma=0.9999 (correct and necessary)
+#
+# STAGE SCHEDULE:
+#   Stage 0: forced_pit_threshold=0.35 (~100k steps)
+#     → Fires at ~step 929 in every episode. Value function bootstrapped.
+#   Stage 1: forced_pit_threshold=0.25 (graduate at 50% lap rate)
+#     → Agent must pit 0.25-0.35 on its own. Env is backup for 0-0.25.
+#   Stage 2: forced_pit_threshold=0.0, max_accel=15.0 (graduate at 30%)
+#     → Agent fully autonomous. Value function bootstrapped correctly.
+#   Stage 3: forced_pit_threshold=0.0, full racing (never graduates)
+#
+STAGES_PIT_V4: List[CurriculumStage] = [
+
+    # -- Stage 0: State-conditional forced pits at threshold=0.35 -----------
+    # Goal: bootstrap value function with pit experiences ON WORN TYRES ONLY.
+    #
+    # WHY threshold=0.35:
+    #   tyre_life wears at ~0.0007/step (base rate). Starting at 1.0:
+    #   tyre_life < 0.35 at ~step 929.
+    #   ppo_tyre survives ~1500+ steps → 100% of episodes reach step 929.
+    #   Forced pits fire AT THE RIGHT STATE: worn tyres (~35% life left).
+    #   No fresh-tyre pitting (tyre_life > 0.35 for steps 0-928).
+    #   Value function learns: Q(s_tyre035, pit) >> Q(s_tyre035, no-pit).
+    #
+    # WHY max_accel=11.0 (not 6.0):
+    #   We start from ppo_tyre which was trained at max_accel=11-15.
+    #   Capping back to 6.0 would create unnecessary degradation.
+    #   ppo_tyre already knows how to drive at 15 m/s.
+    #
+    # Graduation: grad_lap_rate=0.0 → any lap rate passes.
+    # grad_window=50 → must see 50 rollouts (~102k steps) before graduating.
+    CurriculumStage(
+        name                 = "Stage 0 -- State-Conditional Pit Bootstrap (tyre<0.35)",
+        max_accel            = 11.0,
+        forced_pit_threshold = 0.35,  # force pit when tyre_life < 0.35
+        forced_pit_interval  = 0,     # time-based forcing disabled
+        reward_kwargs        = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.1,
+            lateral_weight    = 0.5,
+            heading_weight    = 0.1,
+            smoothness_weight = 0.05,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 0.0,   # graduate after filling the window
+        grad_window   = 50,    # 50 rollouts × 2048 steps ≈ 100k steps
+    ),
+
+    # -- Stage 1: Lower threshold=0.25 (backup for deeply worn tyres) -------
+    # Goal: agent must handle tyre_life 0.25-0.35 autonomously.
+    # The env only forces pits when tyre_life < 0.25 — a safety net.
+    # The agent's own pit_signal must fire between tyre_life 0.25-0.35.
+    # Value function (bootstrapped from Stage 0) should guide the agent.
+    CurriculumStage(
+        name                 = "Stage 1 -- Agent Pits 0.25-0.35, Env Backup <0.25",
+        max_accel            = 11.0,
+        forced_pit_threshold = 0.25,  # backup: force pit if tyre_life < 0.25
+        forced_pit_interval  = 0,
+        reward_kwargs        = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.1,
+            lateral_weight    = 0.5,
+            heading_weight    = 0.1,
+            smoothness_weight = 0.05,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 0.5,
+        grad_window   = 5,
+    ),
+
+    # -- Stage 2: No forced pits, full speed, agent fully autonomous --------
+    # Goal: agent handles all pit decisions without assistance.
+    # Forced pits disabled (threshold=0.0). Agent must set pit_signal > 0
+    # when tyre_life is low (learned from Stages 0-1 value function).
+    CurriculumStage(
+        name                 = "Stage 2 -- Full Speed, Agent Pits Autonomously",
+        max_accel            = 15.0,
+        forced_pit_threshold = 0.0,   # no forced pits from here
+        forced_pit_interval  = 0,
+        reward_kwargs        = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.1,
+            lateral_weight    = 0.5,
+            heading_weight    = 0.1,
+            smoothness_weight = 0.05,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 0.3,
+        grad_window   = 5,
+    ),
+
+    # -- Stage 3: Full racing + autonomous pit strategy (never graduates) ---
+    CurriculumStage(
+        name                 = "Stage 3 -- Full Racing + Pit Strategy",
+        max_accel            = 15.0,
+        forced_pit_threshold = 0.0,
+        forced_pit_interval  = 0,
+        reward_kwargs        = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.1,
+            lateral_weight    = 0.5,
+            heading_weight    = 0.1,
+            smoothness_weight = 0.05,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 1.1,   # never graduates
+        grad_window   = 9999,
+    ),
+]
+
+
+# =============================================================================
 # CURRICULUM CALLBACK
 # =============================================================================
 
@@ -523,11 +667,18 @@ class CurriculumCallback(BaseCallback):
         if hasattr(inner_env, 'forced_pit_interval'):
             inner_env.forced_pit_interval = stage.forced_pit_interval
 
+        # d21: Update forced pit threshold (0.0 = disabled, >0 = force pit when
+        # tyre_life < threshold). State-conditional, not time-conditional.
+        if hasattr(inner_env, 'forced_pit_threshold'):
+            inner_env.forced_pit_threshold = stage.forced_pit_threshold
+
         if self.verbose >= 1:
             print(f"\n[Curriculum] Applying: {stage.name}")
             print(f"             max_accel = {stage.max_accel} m/s^2")
             if stage.forced_pit_interval > 0:
                 print(f"             forced_pit_interval = {stage.forced_pit_interval} steps")
+            if stage.forced_pit_threshold > 0.0:
+                print(f"             forced_pit_threshold = {stage.forced_pit_threshold:.2f} (tyre_life)")
 
     # -- Called once at training start ----------------------------------------
     def _on_training_start(self) -> None:

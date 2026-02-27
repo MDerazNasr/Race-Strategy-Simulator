@@ -296,6 +296,133 @@ def zero_pit_signal_output(ppo_model, pit_action_dim: int = 2) -> None:
     print(f"          Throttle/steer outputs: unchanged from BC transfer.")
 
 
+def load_ppo_tyre_into_ppo_pit(ppo_pit_model, ppo_tyre_path: str, bc_pit_path: str, device: str) -> None:
+    """
+    Initialize a 3D-action pit-stop PPO from ppo_tyre weights + BC pit row (d21).
+
+    WHY THIS IS NEEDED (d21 design):
+    =================================
+    d18-d20 all started from scratch (or BC only).  ppo_tyre is a strong
+    prior: it has been trained for 5M+ steps on tyre-degradation driving and
+    survives ~1500+ steps per episode.  This matters because:
+
+      1. ppo_tyre's value function already knows driving quality at each state.
+         Starting from this value function means Stage 0 forced pits (at
+         tyre_life=0.35) give MEANINGFUL gradient — the value function has
+         a calibrated baseline to update from.
+
+      2. ppo_tyre's actor policy knows how to drive fast without crashing.
+         The agent will reach step 929 (tyre_life=0.35) in every episode.
+         The forced pit fires at the RIGHT state, every time.
+
+      3. Starting from BC alone (d18-d20): ep_len collapsed to 30-50 steps
+         during early training because the BC policy with pit obs was weaker.
+         Episodes never reached the forced pit (interval=500) or the correct
+         tyre state (threshold=0.35, ~step 929).
+
+    THE WEIGHT TRANSFER:
+    ====================
+    ppo_tyre has a 2D action space [throttle, steer].
+    ppo_pit has a 3D action space [throttle, steer, pit_signal].
+
+    Hidden layers (12D obs → 128 → 128):
+      ppo_tyre.policy_net → ppo_pit.policy_net  (EXACT COPY)
+      ppo_tyre.value_net  → ppo_pit.value_net   (EXACT COPY)
+
+    Action head:
+      ppo_tyre.action_net[0] (throttle) → ppo_pit.action_net[0]  (EXACT COPY)
+      ppo_tyre.action_net[1] (steer)    → ppo_pit.action_net[1]  (EXACT COPY)
+      bc_policy_pit_v3.net[4][2] (pit)  → ppo_pit.action_net[2]  (FROM BC)
+
+    Log standard deviations:
+      ppo_tyre.log_std[0,1] → ppo_pit.log_std[0,1]  (driving std preserved)
+      ppo_pit.log_std[2]: left at its random init (SB3 default ~0.0 → std=1.0)
+
+    No zero-init of pit row (d20 Fix B removed — it caused catastrophic failure).
+    The BC-initialized pit row starts near the BC prior, which is better than
+    random because the BC policy was trained with pit_class_weight=1000.
+
+    Args:
+        ppo_pit_model:  Freshly built SB3 PPO with 3D action space.
+        ppo_tyre_path:  Path to the saved ppo_tyre model (e.g. 'rl/ppo_tyre.zip').
+        bc_pit_path:    Path to BC pit policy (e.g. 'bc/bc_policy_pit_v3.pt').
+        device:         PyTorch device string ('cpu' or 'cuda').
+    """
+    from stable_baselines3 import PPO
+
+    # ── Load ppo_tyre ─────────────────────────────────────────────────────
+    print(f"[BC Init] Loading ppo_tyre from '{ppo_tyre_path}'...")
+    ppo_tyre = PPO.load(ppo_tyre_path, device=device)
+
+    tyre_policy_net = ppo_tyre.policy.mlp_extractor.policy_net
+    tyre_value_net  = ppo_tyre.policy.mlp_extractor.value_net
+    tyre_action_net = ppo_tyre.policy.action_net   # Linear(128, 2)
+    tyre_log_std    = ppo_tyre.policy.log_std       # shape (2,)
+
+    # ── Load BC pit policy (for pit_signal row) ───────────────────────────
+    ckpt = torch.load(bc_pit_path, map_location=device, weights_only=True)
+    # bc_policy_pit_v3 has action_dim=3: rows [0]=throttle, [1]=steer, [2]=pit
+    bc_pit_weight = ckpt["net.4.weight"]  # shape (3, 128)
+    bc_pit_bias   = ckpt["net.4.bias"]    # shape (3,)
+
+    # ── Get ppo_pit network components ────────────────────────────────────
+    pit_policy_net = ppo_pit_model.policy.mlp_extractor.policy_net
+    pit_value_net  = ppo_pit_model.policy.mlp_extractor.value_net
+    pit_action_net = ppo_pit_model.policy.action_net   # Linear(128, 3)
+    pit_log_std    = ppo_pit_model.policy.log_std       # shape (3,)
+
+    with torch.no_grad():
+        # ── Transfer hidden layers (driving knowledge) ────────────────────
+        pit_policy_net[0].weight.copy_(tyre_policy_net[0].weight)
+        pit_policy_net[0].bias.copy_(tyre_policy_net[0].bias)
+        pit_policy_net[2].weight.copy_(tyre_policy_net[2].weight)
+        pit_policy_net[2].bias.copy_(tyre_policy_net[2].bias)
+
+        pit_value_net[0].weight.copy_(tyre_value_net[0].weight)
+        pit_value_net[0].bias.copy_(tyre_value_net[0].bias)
+        pit_value_net[2].weight.copy_(tyre_value_net[2].weight)
+        pit_value_net[2].bias.copy_(tyre_value_net[2].bias)
+
+        # ── Transfer throttle/steer rows from ppo_tyre (rows 0,1) ─────────
+        # ppo_tyre.action_net is Linear(128, 2): rows [0]=throttle, [1]=steer
+        pit_action_net.weight.data[0].copy_(tyre_action_net.weight.data[0])
+        pit_action_net.bias.data[0] = tyre_action_net.bias.data[0].clone()
+        pit_action_net.weight.data[1].copy_(tyre_action_net.weight.data[1])
+        pit_action_net.bias.data[1] = tyre_action_net.bias.data[1].clone()
+
+        # ── Transfer pit row from BC policy (row 2) ───────────────────────
+        # bc_policy_pit_v3 row 2 was trained with pit_class_weight=1000.
+        # This is a better prior than random init — it at least knows
+        # tyre_life < 0.3 correlates with pit_signal > 0.
+        pit_action_net.weight.data[2].copy_(bc_pit_weight[2])
+        pit_action_net.bias.data[2] = bc_pit_bias[2].clone()
+
+        # ── Transfer log_std for driving dims (0,1) ───────────────────────
+        # dim 2 (pit) stays at SB3's random init (~0.0 → std=1.0)
+        pit_log_std.data[0] = tyre_log_std.data[0].clone()
+        pit_log_std.data[1] = tyre_log_std.data[1].clone()
+
+    # Also transfer the value head
+    tyre_vf = ppo_tyre.policy.value_net
+    pit_vf  = ppo_pit_model.policy.value_net
+    with torch.no_grad():
+        pit_vf.weight.copy_(tyre_vf.weight)
+        pit_vf.bias.copy_(tyre_vf.bias)
+
+    print(
+        f"[BC Init] Transferred ppo_tyre + BC pit weights into ppo_pit actor.\n"
+        f"  policy_net[0]: {pit_policy_net[0].weight.shape} ← ppo_tyre ✓\n"
+        f"  policy_net[2]: {pit_policy_net[2].weight.shape} ← ppo_tyre ✓\n"
+        f"  value_net:     transferred ✓\n"
+        f"  value_head:    transferred ✓\n"
+        f"  action_net[0] (throttle): ← ppo_tyre ✓\n"
+        f"  action_net[1] (steer):    ← ppo_tyre ✓\n"
+        f"  action_net[2] (pit):      ← bc_policy_pit_v3 (weighted, 1000x) ✓\n"
+        f"  log_std[0,1] (driving):   ← ppo_tyre ✓\n"
+        f"  log_std[2] (pit):         random init (SB3 default) — no zero-init"
+    )
+
+
 def verify_transfer(ppo_model, bc_path: str, device: str) -> None:
     """
     Sanity check: verifies the weight transfer was exact.
