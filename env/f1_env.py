@@ -29,7 +29,7 @@ from rl.rewards import RacingReward
 class F1Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30} #info used for rendering
 
-    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False, pit_stops=False, forced_pit_interval=0):
+    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False, pit_stops=False, forced_pit_interval=0, forced_pit_threshold=0.0):
         super().__init__()
         self.dt = dt #dt = how much simulated time passes each step(). Same as in Car
         self.render_mode = render_mode #render_mode = you'll use this later if you draw stuff
@@ -113,6 +113,28 @@ class F1Env(gym.Env):
         #   at 500-step intervals; bypass keeps code simple for shorter intervals).
         #   forced_pit_interval=0 → disabled (all existing behaviour unchanged).
         self.forced_pit_interval = forced_pit_interval
+
+        # ── Forced pit threshold (Week 5 / d21) ──────────────────────────────
+        # When > 0: the environment forces a pit whenever tyre_life drops below
+        # this threshold, regardless of the agent's pit_signal or cooldown.
+        #
+        # STATE-CONDITIONAL (not time-based).  This is the key insight from d20:
+        #   d19: interval=500 → fired BEFORE tyres were worn (step 500, tyre ~0.85)
+        #   d20: interval=50  → fired on FRESH tyres (step 50, tyre ~0.97) → -200
+        #   d21: threshold=0.35 → fires ONLY when tyre_life < 0.35 (worn tyres)
+        #        No fresh-tyre pitting. No spurious -200 penalties. No "pitting bad".
+        #
+        # TIMING:
+        #   tyre_life starts at 1.0 and wears ~0.0007/step (base rate).
+        #   tyre_life < 0.35 at ~step 929.  ppo_tyre survives ~1500+ steps.
+        #   → Forced pits fire NATURALLY at the right state: tyre_life ≈ 0.35.
+        #   → Value function learns: Q(s_worn, pit) >> Q(s_worn, no-pit).
+        #   → No spurious -200 from pitting on fresh tyres (0.85-1.0 tyre_life).
+        #
+        # forced_pit_threshold=0.35 → force pit when tyre_life < 0.35 (Stage 0)
+        # forced_pit_threshold=0.25 → force pit when tyre_life < 0.25 (Stage 1, backup)
+        # forced_pit_threshold=0.0  → disabled (Stage 2+, agent fully autonomous)
+        self.forced_pit_threshold = forced_pit_threshold
 
         #Track
         self.track = generate_oval_track() #you generate a simple circular-ish track (list of (x,y) points)
@@ -526,17 +548,28 @@ class F1Env(gym.Env):
         # Each step: decrement cooldown by 1 (regardless of pit signal).
         pit_reward = 0.0
         if self.pit_stops:
-            # Forced pit (d19 Stage 0): overrides agent signal and cooldown.
-            # Fires at regular intervals so the value function learns pit benefit
-            # before the agent is required to discover pitting on its own.
-            forced_pit = (
+            # Time-forced pit (d19/d20 Stage 0): fires every N steps.
+            # Kept for backward compat with STAGES_PIT_V2/V3. Not used in d21.
+            time_forced = (
                 self.forced_pit_interval > 0
                 and self.step_count % self.forced_pit_interval == 0
+            )
+            # State-forced pit (d21 Stage 0): fires when tyre_life < threshold.
+            # KEY INSIGHT from d20 post-mortem: pit exploration MUST be state-
+            # conditional (tyre-life-based), not time-conditional. Time-based
+            # forcing on step 50/500 pits fresh tyres → -200 → "pitting always bad".
+            # Tyre-life-based forcing pits ONLY when tyres are worn → teaches the
+            # correct association: worn tyres → pit is beneficial.
+            tyre_life_now = float(getattr(self.car, 'tyre_life', 1.0))
+            state_forced = (
+                self.forced_pit_threshold > 0.0
+                and tyre_life_now < self.forced_pit_threshold
+                and self.pit_cooldown_remaining == 0
             )
             # Normal agent-signaled pit: requires pit_signal > 0 and no cooldown.
             agent_pit = (pit_signal > 0.0 and self.pit_cooldown_remaining == 0)
 
-            if forced_pit or agent_pit:
+            if time_forced or state_forced or agent_pit:
                 self.car.reset_tyres()
                 pit_reward = self.PIT_PENALTY
                 self.pit_cooldown_remaining = self.PIT_COOLDOWN_STEPS

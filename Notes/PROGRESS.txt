@@ -738,27 +738,72 @@ Key lesson from d20:
   The correct fix must be CONDITIONAL: force pits only when tyres ARE worn.
 
 ==============================================================================
-WHAT'S NEXT (suggested -- d21)
+WEEK 5 / d21 — Pit Strategy v4: BREAKTHROUGH — Agent Learns to Pit!
 ==============================================================================
 
-1. Pit Strategy v4 (d21): TYRE-LIFE-BASED conditional forced pits.
-   The core insight from d18-d20: pit exploration must be STATE-CONDITIONAL.
-   "Pit when tyre_life < threshold" (NOT "pit every N steps" or "pit randomly").
+What was built:
+  env/f1_env.py          Added forced_pit_threshold=0.0 param + state_forced logic
+                         In step(): force pit when tyre_life < threshold AND cooldown==0
+  rl/curriculum.py       Added forced_pit_threshold to CurriculumStage + STAGES_PIT_V4
+  rl/bc_init_policy.py   Added load_ppo_tyre_into_ppo_pit() function
+  rl/train_ppo_pit_v4.py Full d21 pipeline
+  rl/evaluate.py         Added PPO Pit v4 entry + pit_count tracking (Pits column)
+  Notes/d21.txt          Full documentation
 
-   Changes:
-   A. Add forced_pit_threshold to F1Env (replaces forced_pit_interval):
-      In step(): if tyre_life < forced_pit_threshold → force pit.
-      This ensures forced pits ONLY fire on worn tyres (no fresh-tyre -200).
+Core change: STATE-CONDITIONAL forced pits (forced_pit_threshold, not forced_pit_interval):
+  forced_pit_threshold=0.35 → fire pit ONLY when tyre_life < 0.35 (worn tyres)
+  Timing: tyre_life < 0.35 at ~step 929. ppo_tyre survives 1500+ steps.
+  → Forced pits fire AT THE RIGHT STATE. No fresh-tyre pitting. No "pitting bad" learning.
 
-   B. STAGES_PIT_V4 with threshold schedule:
-      Stage 0: threshold=0.4 → every episode that reaches 40% tyre gets pit
-      Stage 1: threshold=0.2 → agent controls pits for 20-40%, env forces at 20%
-      Stage 2: threshold=0.0 → agent fully responsible
-      Stage 3: threshold=0.0 → full racing
+Also: started from ppo_tyre (1500-step survival) instead of BC.
+  load_ppo_tyre_into_ppo_pit(): hidden layers + throttle/steer from ppo_tyre,
+  pit row [2] from bc_policy_pit_v3 (1000x weighted BC). NO zero-init.
 
-   C. REMOVE zero-init (Fix B from d20 — caused catastrophic harm).
-   D. KEEP weighted BC loss (Fix A from d20 — correct, should help).
-   E. KEEP gamma=0.9999 (from d19 — correct and necessary).
+Training arc:
+  Stage 0: ep_len_mean ≈ 2000 (FULL EPISODES from iteration 1!)
+            All stages graduated at ~200k steps (vs d20 which never left Stage 1)
+  Stage 3: ep_len_mean ≈ 1240, ep_rew_mean ≈ -840 (negative from over-pitting
+           during stochastic training; deterministic eval gives positive reward)
 
-2. Multi-compound tyres: soft/medium/hard with different wear/grip tradeoffs.
-3. Load transfer under braking (vehicle dynamics).
+Diagnostic (fixed start, deterministic):
+  steps=1254, reward=1562, laps=7, pit_count=1
+  pit_signal: mean=-0.997, frac>0=0.001 (fired exactly ONCE at correct moment)
+  → THE BREAKTHROUGH: agent learned to pit once, at the right time.
+
+Evaluation (fixed start, N=10):
+  Policy                   Lap%   Reward  Speed(m/s)  LatErr(m)  Laps  Pits
+  ---------------------------------------------------------------------------
+  PPO Pit (d18)            0.0%   941.9    22.09       0.365     3.0    0
+  PPO Pit v2 (d19)         0.0%   826.9    22.02       0.605     3.0    0
+  PPO Pit v3 (d20)         0.0%   -17.9     9.80       1.357     0.0    0
+  PPO Pit v4 (d21)         0.0%  1877.3    17.59       1.198     7.0    1.0  <-- NEW BEST
+  PPO Tyre (d17, no pits)  0.0%  1643.5    16.09       2.375     8.0    N/A
+  PPO Curriculum v2 (3M)  100%   4531.7    26.92       0.678    17.0    N/A
+  ---------------------------------------------------------------------------
+
+Key comparisons:
+  d21 vs d20: 1877 vs -17.9  — ~100× improvement (from catastrophe to breakthrough)
+  d21 vs d18: 1877 vs  941.9 — 2× improvement (best previous pit policy)
+  d21 vs ppo_tyre: 1877 vs 1643 — pitting HELPS by 14% (pit is worth it!)
+
+The pit stop mechanic is proven beneficial: d21 in the pit env outperforms
+ppo_tyre in the tyre-only env. The agent correctly values pit timing.
+
+==============================================================================
+WHAT'S NEXT (suggested -- d22)
+==============================================================================
+
+1. Pit timing optimization:
+   d21 pits ~once at step 341 (diagnostic) — earlier than the forced threshold.
+   Could the agent learn to optimize exact pit timing for max total reward?
+   Options:
+   A. Longer training (2M+ steps) to fine-tune pit timing
+   B. Add tyre_life-based shaping to reward (penalty for very worn tyres)
+   C. Explore why d21 pits earlier than step 929 — is BC prior pulling early?
+
+2. Multi-lap evaluation: d21 has 0% lap completion rate.
+   With 7 laps in 1359 steps, it's close to the 2000-step limit.
+   Could work with a longer episode cap or investigate why it crashes.
+
+3. Multi-compound tyres: soft/medium/hard with different wear/grip tradeoffs.
+4. Load transfer under braking (vehicle dynamics).

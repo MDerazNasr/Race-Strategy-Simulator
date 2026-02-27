@@ -147,6 +147,7 @@ class EpisodeResult:
     mean_lateral_error_m: float   # mean |lateral error| in meters
     max_lateral_error_m: float    # worst single-step lateral error in meters
     laps_completed: int     # number of full laps completed
+    pit_count: int = 0      # number of pit stops taken (d21+)
     trajectory_x: List[float] = field(default_factory=list)  # for trajectory plot
     trajectory_y: List[float] = field(default_factory=list)
 
@@ -165,6 +166,7 @@ class PolicySummary:
     avg_lateral_error_m: float
     avg_steps: float
     avg_laps_completed: float
+    avg_pit_count: float = 0.0   # d21+: mean number of pits per episode
     all_results: List[EpisodeResult] = field(default_factory=list)
 
 
@@ -269,6 +271,7 @@ def run_episode(
         mean_lateral_error_m=float(np.mean(lateral_errors)) if lateral_errors else 0.0,
         max_lateral_error_m=float(np.max(lateral_errors)) if lateral_errors else 0.0,
         laps_completed=env.laps_completed,   # read from env — single source of truth
+        pit_count=int(getattr(env, 'pit_count', 0)),  # d21+: 0 for non-pit envs
         trajectory_x=trajectory_x,
         trajectory_y=trajectory_y,
     )
@@ -316,6 +319,7 @@ def run_episodes(
     lat_errors     = [r.mean_lateral_error_m  for r in results]
     steps_list     = [r.steps                 for r in results]
     laps           = [r.laps_completed        for r in results]
+    pits           = [r.pit_count             for r in results]
     completions    = [not r.terminated        for r in results]  # True = survived
 
     return PolicySummary(
@@ -328,6 +332,7 @@ def run_episodes(
         avg_lateral_error_m=float(np.mean(lat_errors)),
         avg_steps=float(np.mean(steps_list)),
         avg_laps_completed=float(np.mean(laps)),
+        avg_pit_count=float(np.mean(pits)),
         all_results=results,
     )
 
@@ -626,6 +631,24 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_pit_v3.zip",
             "env_key":       "pit",   # routes to env_pit (3D action space)
         },
+        {
+            "name":          "PPO Pit Strategy v4 (d21)",
+            "color":         "#FF6E40",
+            # d21 — state-conditional forced pits (tyre-life-based):
+            #   KEY INSIGHT from d20 catastrophe: pit exploration must be STATE-
+            #   CONDITIONAL, not time-based. forced_pit_threshold=0.35 fires ONLY
+            #   when tyre_life < 0.35 (~step 929), never on fresh tyres.
+            #   Started from ppo_tyre (1500-step survival) to guarantee episodes
+            #   reach tyre_life=0.35 from rollout 1.
+            #   Removed zero-init (d20 Fix B — confirmed catastrophic harm).
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4.zip",
+            "env_key":       "pit",
+        },
     ]
 
     summaries = []
@@ -676,6 +699,8 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
         print(f"  Avg lateral error:     {summary.avg_lateral_error_m:.3f} m")
         print(f"  Avg steps:             {summary.avg_steps:.0f}")
         print(f"  Avg laps completed:    {summary.avg_laps_completed:.2f}")
+        if summary.avg_pit_count > 0:
+            print(f"  Avg pit stops:         {summary.avg_pit_count:.2f}")
 
     return summaries
 
@@ -715,9 +740,10 @@ def print_comparison_table(summaries: List[PolicySummary], title: str = "FINAL E
         f"{'Speed m/s':>11}"
         f"{'Lat Err m':>11}"
         f"{'Laps':>7}"
+        f"{'Pits':>6}"
     )
     print(header)
-    print("  " + "─" * 66)
+    print("  " + "─" * 73)
 
     # Find best value per column for highlighting
     def best_idx(values, higher_is_better=True):
@@ -742,6 +768,7 @@ def print_comparison_table(summaries: List[PolicySummary], title: str = "FINAL E
         mark_lat  = " ←" if i == best_lat  else "  "
         mark_lapc = " ←" if i == best_lapc else "  "
 
+        pit_str = f"{s.avg_pit_count:>5.1f}" if s.avg_pit_count > 0 else "    -"
         row = (
             f"  {s.name:<{col_w}}"
             f"{s.lap_completion_rate*100:>6.1f}%{mark_lap}"
@@ -749,10 +776,11 @@ def print_comparison_table(summaries: List[PolicySummary], title: str = "FINAL E
             f"{s.avg_speed_ms:>9.2f}{mark_spd}"
             f"{s.avg_lateral_error_m:>9.3f}{mark_lat}"
             f"{s.avg_laps_completed:>5.2f}{mark_lapc}"
+            f"  {pit_str}"
         )
         print(row)
 
-    print("  " + "─" * 66)
+    print("  " + "─" * 73)
     print("  ← = best in column")
     print("═" * 88)
 
