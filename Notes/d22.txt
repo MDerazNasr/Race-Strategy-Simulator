@@ -1,0 +1,172 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  d22 — Pit Strategy v4 Continued: Better Driving, Lost Pitting              ║
+║  Week 5                                                                      ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+WHAT WAS BUILT
+==============
+Continued training from ppo_pit_v4 (d21) for 2M additional steps, with a
+lower learning rate (1e-4 → 1e-6 cosine) for fine-tuning.
+
+New files:
+  rl/train_ppo_pit_v4_continue.py  — d22 training pipeline
+  rl/ppo_pit_v4_cont.zip           — trained model
+  Notes/d22.txt                    — this file
+
+Modified files:
+  rl/evaluate.py                   — added PPO Pit v4 Continued entry
+  Notes/PROGRESS.txt               — updated with d22 results
+
+
+TRAINING ARC
+============
+Starting point: ppo_pit_v4.zip (d21), step ~1M.
+  d21 final training: ep_rew_mean ≈ -840, ep_len_mean ≈ 1240.
+
+d22 training progression:
+  Step 1.0M (start):  ep_rew_mean ≈ -808  (d21 endpoint)
+  Step 1.2M:          ep_rew_mean ≈ +400  (reward crosses zero!)
+  Step 1.5M:          ep_rew_mean ≈ +700
+  Step 2.0M:          ep_rew_mean ≈ +900
+  Step 2.5M:          ep_rew_mean ≈ +1050
+  Step 3.0M (end):    ep_rew_mean ≈ +1050-1100
+
+  ep_len_mean end: ≈ 1100-1180
+
+The ep_rew_mean improved from -840 → +1050, a +1890 point improvement.
+The stochastic over-pitting problem from d21 was fully resolved.
+
+
+EVALUATION RESULTS
+==================
+
+Fixed start (N=10, deterministic):
+  Policy                   Lap%   Reward  Speed(m/s)  LatErr(m)  Laps  Pits
+  ---------------------------------------------------------------------------
+  PPO Pit v4 (d21)         0.0%   1877    17.59       1.198      7.0    -
+  PPO Pit v4 Cont (d22)    0.0%   2283    18.74       0.182 ←    8.0    0
+  PPO Tyre (d17, no pits)  0.0%   1643    16.09       2.375      8.0    -
+  Expert (rule-based)     100.0%  2909    17.10       0.797     11.0    -
+  PPO Curriculum v2 (3M)  100.0%  4531    26.92       0.678     17.0    -
+  ---------------------------------------------------------------------------
+
+Key numbers:
+  d22 reward:       2283  (d21: 1877, +22% improvement)
+  d22 lateral err:  0.182 m  (BEST IN ENTIRE TABLE — better than Expert at 0.797 m)
+  d22 laps:         8  (d21: 7, ppo_tyre: 8)
+  d22 pits:         0  (d21: 1, d19/d18: 0)
+
+Random start (N=20):
+  d22: 0% lap rate, reward=527, 2.30 laps, 0.35 pit stops
+  d21: 0% lap rate, reward=567, 3.80 laps, 1.80 pit stops
+
+
+DIAGNOSTIC — FIXED START, DETERMINISTIC
+=========================================
+steps=1198, reward=1803, laps=7, pit_count=0
+pit_signal: mean=-1.0000, std=0.0000, frac>0=0.0000
+tyre_life at end: 0.210
+
+The agent:
+  - pit_signal collapsed to -1.0000, std=0.000 (same as d18/d19 pre-discovery!)
+  - Never pits despite tyre_life reaching 0.210 (significantly worn)
+  - Achieves 1803 reward in 1198 steps across 7 laps WITHOUT pitting
+  - Exceptional lateral precision (0.182 m in full eval)
+
+
+WHAT HAPPENED: EXPLOITATION OF CAREFUL DRIVING
+===============================================
+d21 discovered pitting (pit once at the right moment, reward=1877).
+d22 found an even better local optimum: drive very carefully without pitting
+at all, earning 2283 reward through superior lane following and speed control.
+
+Why did the 2M extra steps cause this?:
+
+  1. At d21's end: pit policy was shaky. Stochastic rollouts saw many
+     extra pits → ep_rew_mean = -840. The gradient signal said "reduce pitting."
+
+  2. In fine-tuning (d22): the agent simultaneously:
+     (a) Reduced pit frequency to suppress negative pit-penalty rewards
+     (b) Improved driving quality (lane keeping, speed control)
+
+  3. Better driving compensated for not pitting:
+     d21 (1 pit): 1877 reward, 17.59 m/s, 1.198 m lateral error
+     d22 (0 pits): 2283 reward, 18.74 m/s, 0.182 m lateral error
+
+     The +406 reward gain from better driving > -200 pit benefit.
+     The agent rationally chose "drive better" over "pit strategically."
+
+  4. Result: pit_signal collapsed back to -1.0 (same as d18/d19).
+     The discovery was LOST in the fine-tuning phase.
+
+This is the EXPLOITATION VS EXPLORATION tradeoff:
+  - d21: discovered pitting (exploration) but imperfect execution
+  - d22: exploited better driving (exploitation) but abandoned pitting
+  - Optimal (not yet achieved): combine both — drive well AND pit at the right time
+
+The reward function does not explicitly incentivize pitting. The agent gets:
+  - +progress_reward per step (continuous)
+  - +100 per lap completed (large bonus)
+  - -200 per pit (one-time penalty, recovered over ~200+ future steps)
+  Without a specific incentive to pit at tyre_life < X, the agent prefers
+  the safer strategy: avoid the -200 risk entirely.
+
+
+LESSONS FROM D22
+================
+1. Fine-tuning can cause regression in discovered behaviors.
+   PPO's on-policy nature means new rollouts overwrite old experiences.
+   If the new reward landscape prefers no-pitting, pit knowledge disappears.
+
+2. The pit behavior is not robust without explicit incentives.
+   d21's single pit was likely maintained by the forced-pit memory in the
+   value function. 2M steps of no-forced-pits let this knowledge decay.
+
+3. Better driving quality ≠ better racing strategy.
+   d22 is the best driver in the table (0.182 m lateral error — beats Expert!)
+   but makes the "wrong" strategic decision by not pitting on worn tyres.
+
+4. To maintain pit discovery alongside driving quality, we need EITHER:
+   A. A reward term that explicitly incentivizes correct pit timing
+   B. An architecture that separates driving from strategy (e.g., a separate
+      pit-decision head with its own training signal)
+   C. Constrained fine-tuning: freeze the pit output row during d22 so
+      driving improves without overwriting pit knowledge
+
+
+D23 DESIGN OPTIONS
+==================
+The central challenge: preserve pit discovery (d21 breakthrough) while
+also achieving d22's driving quality improvement.
+
+Option A — Pit reward shaping:
+  Add reward: +R_pit when pit fires AND tyre_life < 0.3 (correct timing)
+  Add penalty: -P_pit when pit fires AND tyre_life > 0.5 (wrong timing)
+  This makes correct pit timing explicitly rewarded, not just a side effect.
+
+Option B — Freeze pit row during fine-tuning:
+  Retrain d21 but freeze action_net.weight[2] and action_net.bias[2]
+  (the pit output row). Only throttle/steer improve during d22.
+  The pit policy from d21 is preserved while driving quality improves.
+
+Option C — Extend pit env episode length (max_steps=4000):
+  Currently max_steps=2000 (200s). If episodes were longer, a SECOND pit
+  at step ~1800-2000 would be beneficial. The agent might re-discover
+  pitting when the episode is long enough to need two tyres stints.
+
+Option D — Restart from d21 with explicit pit schedule in reward:
+  Keep d21 as starting point (pit=1). Add pit_timing_reward to RacingReward.
+  Fine-tune for 2M steps with the new reward. Agent should maintain pitting
+  AND improve driving.
+
+RECOMMENDED: Option B (freeze pit row) + Option A (add pit reward shaping).
+  - Freeze pit row: guarantees pit knowledge preserved during d23 fine-tuning
+  - Pit reward: provides explicit signal even after forced pits are removed
+  Together they address both the forgetting problem and the reward incentive.
+
+
+PROGRESSION SUMMARY
+===================
+  d21: BREAKTHROUGH — pit once at right time (reward=1877, 1 pit)
+  d22: EXPLOITATION — no pitting, exceptional driving (reward=2283, 0 pits)
+  d23: Goal — combine both (reward > 2283, pits > 0, lateral err ≈ 0.2)
