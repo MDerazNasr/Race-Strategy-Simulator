@@ -790,20 +790,50 @@ The pit stop mechanic is proven beneficial: d21 in the pit env outperforms
 ppo_tyre in the tyre-only env. The agent correctly values pit timing.
 
 ==============================================================================
-WHAT'S NEXT (suggested -- d22)
+WEEK 5 / d22 — Pit v4 Continued: Better Driving, Lost Pitting
 ==============================================================================
 
-1. Pit timing optimization:
-   d21 pits ~once at step 341 (diagnostic) — earlier than the forced threshold.
-   Could the agent learn to optimize exact pit timing for max total reward?
-   Options:
-   A. Longer training (2M+ steps) to fine-tune pit timing
-   B. Add tyre_life-based shaping to reward (penalty for very worn tyres)
-   C. Explore why d21 pits earlier than step 929 — is BC prior pulling early?
+What was built:
+  rl/train_ppo_pit_v4_continue.py  — 2M more steps from ppo_pit_v4 at LR 1e-4
+  rl/ppo_pit_v4_cont.zip           — trained model
 
-2. Multi-lap evaluation: d21 has 0% lap completion rate.
-   With 7 laps in 1359 steps, it's close to the 2000-step limit.
-   Could work with a longer episode cap or investigate why it crashes.
+Training arc:
+  Start (d21 endpoint, ~1M steps):  ep_rew_mean = -840
+  End   (d22 endpoint, ~3M steps):  ep_rew_mean = +1050-1100
 
-3. Multi-compound tyres: soft/medium/hard with different wear/grip tradeoffs.
-4. Load transfer under braking (vehicle dynamics).
+Evaluation (fixed start, N=10):
+  d22: Reward=2283, LatErr=0.182 m (BEST IN TABLE — beats Expert at 0.797!), Laps=8, Pits=0
+
+Diagnostic: pit_signal=-1.0000, std=0.000, pit_count=0. Pit behavior lost.
+
+What happened — EXPLOITATION vs EXPLORATION:
+  Fine-tuning shifted from "pit once carefully" (d21) to "drive perfectly, skip pitting".
+  Better driving quality (+406 reward) > pit benefit (-200 penalty + future tyre gain).
+  Classic exploitation of local optimum: pitting requires a -200 risk the agent avoids.
+
+d22 is the best DRIVER in the table (0.182 m lateral error, beats Expert!)
+but makes the wrong STRATEGY (ignores worn tyres at tyre_life=0.210 at episode end).
+
+==============================================================================
+WHAT'S NEXT (suggested -- d23)
+==============================================================================
+
+Goal: combine d21's pit discovery with d22's driving quality.
+Central problem: fine-tuning overwrites pit behavior. Need explicit incentives.
+
+Best options:
+  A. Restart from d21 + pit reward shaping in RacingReward:
+     Add: +R when pit fires AND tyre_life < 0.3 (correct timing incentive)
+     Start from ppo_pit_v4 (already knows how to pit once).
+     Fine-tune with new reward — agent should maintain pitting AND improve driving.
+
+  B. Freeze pit output row during fine-tuning:
+     Freeze action_net.weight[2] and action_net.bias[2] (the pit row).
+     Driving/value network updates; pit policy locked at d21's correct behavior.
+
+  C. Longer episodes (max_steps=4000):
+     Two-stop strategy becomes optimal. Agent might re-discover pitting
+     when a single tyre stint is not enough for the full episode.
+
+Recommended: Option A (d21 + pit reward shaping).
+  Most direct path to combined goal.

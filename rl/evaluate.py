@@ -649,6 +649,20 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_pit_v4.zip",
             "env_key":       "pit",
         },
+        {
+            "name":          "PPO Pit v4 Continued (d22)",
+            "color":         "#00BCD4",
+            # d22: continued training from ppo_pit_v4 for 2M more steps.
+            # Goal: sharpen pit timing, reduce stochastic over-pitting,
+            # improve post-pit driving stability.
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4_cont.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4_cont.zip",
+            "env_key":       "pit",
+        },
     ]
 
     summaries = []
