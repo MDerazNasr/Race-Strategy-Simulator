@@ -1,0 +1,194 @@
+D28: Three-Layer Freeze + Pit Timing Reward + Fixed LR — PARTIAL SUCCESS
+=========================================================================
+
+DATE: 2026-03-01
+STATUS: PARTIAL SUCCESS — LR fix worked (pit row moved +5.7%), random-start improved,
+        but fixed-start reward still locked at 1883
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHAT WAS BUILT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+D28 is the direct fix for d27's LR bug. D27 confirmed that pit_timing_reward=True
+is SAFE with frozen driving, but the pit row barely moved (+1.1%) because SB3's
+reset_num_timesteps=False caused the LR to start at 3.5e-5 instead of 1e-4.
+
+D28 applies the same setup as d27, but with reset_num_timesteps=True so the cosine
+LR schedule restarts from progress=1.0 (LR = 1e-4 at step 0 of d28).
+
+SETUP:
+  Starting point: ppo_pit_v4_d27.zip (d27 — most-shaped pit row, bias=-0.839)
+  Environment: make_env_pit_d23 (pit_timing_reward=True)
+    - tyre_life < 0.30 when pitting: +100 bonus (net cost = -100)
+    - tyre_life > 0.50 when pitting: -100 extra (net cost = -300)
+    - Neutral zone 0.30–0.50: no change (net cost = -200)
+  Three-layer freeze: identical to d26/d27
+    Layer 1: mlp_extractor.policy_net (requires_grad=False, 18,176 params)
+    Layer 2: action_net.weight rows 0,1 + bias[0,1] (gradient hooks)
+    Layer 3: log_std[0,1] (gradient hook)
+  Only 130 policy params trainable: action_net.weight[2,:] + bias[2] + log_std[2]
+  STAGES_PIT_V5: safety net 0.25→0.15→0.08
+  LR: cosine 1e-4→1e-6 with reset_num_timesteps=True (THE KEY FIX)
+  Total steps: 2M
+
+THE KEY FIX vs D27:
+  D27: reset_num_timesteps=False → SB3 computes progress = 1 - 3M/5M = 0.40
+       → cosine(1e-4, 1e-6, 0.40) ≈ 3.5e-5 at step 0 of d27 (WRONG)
+  D28: reset_num_timesteps=True  → SB3 treats d28 as fresh → progress = 1.0
+       → LR starts at exactly 1e-4 (confirmed in training log: 9.96e-05)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+POST-TRAINING DIAGNOSTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  LR confirmed at start: 9.96e-05 (≈1e-4) — CORRECT!
+
+  Freeze verification vs d27 (should all be 0.0):
+    mlp_extractor.policy_net drift  = 0.00e+00  (PERFECT)
+    action_net.weight[0,:] drift   = 0.00e+00  (PERFECT)
+    action_net.weight[1,:] drift   = 0.00e+00  (PERFECT)
+
+  Weight changes:
+    throttle row: 0.049886 → 0.049886  (IDENTICAL — frozen)
+    steer row:    0.027054 → 0.027054  (IDENTICAL — frozen)
+    pit row:      0.304543 → 0.321929  (+5.7% — 5x more than d27's +1.1%)
+    pit bias:    -0.839003 → -0.928659  (more negative — agent delays pitting)
+    pit bias trajectory: d21=0.006 → d26=-0.817 → d27=-0.839 → d28=-0.929
+
+  approx_kl: 1e-5 to 6e-5 (vs d27's 1e-11 to 1e-9 — 4-6 orders of magnitude higher)
+  → Confirmed: d28 is receiving real gradient, d27 was basically frozen in policy space.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TRAINING LOG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  No value crisis! ep_rew_mean started positive (from d27's warm start) and improved.
+  Value function recalibration was brief (ep_rew went -351 → 106 → 499 in first 18 iter).
+  The three-layer freeze prevented any driving regression during recalibration.
+
+  approx_kl: 1e-5 to 6e-5 throughout (healthy gradient — not zero, not exploding).
+  std: stable throughout — no collapse.
+  ep_len_mean: longer episodes in Stage 2 than d27 (agent delaying pit → longer stints).
+
+  Stage progression:
+    Stage 0 (threshold=0.25): ~500k steps
+    Stage 1 (threshold=0.15): ~1M steps
+    Stage 2 (threshold=0.08): ~500k steps, final (never graduates — no crash threshold)
+
+  Training took ~34 min (slower than d27's ~14 min due to longer episodes in Stage 2).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EVALUATION RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Fixed-Start (N=10, deterministic):
+    d28: reward=1883.41, laps=7, steps=1354, speed=17.61, lat_err=1.148
+    d27: reward=1883.41, laps=7, steps=1354, speed=17.61, lat_err=1.148
+    d26: reward=1883.41, laps=7, steps=1354, speed=17.61, lat_err=1.148
+    → d28 IS IDENTICAL TO D26/D27 TO 2 DECIMAL PLACES (3rd consecutive 1883.41)
+
+  Random-Start (N=20, deterministic):
+    d28: reward=774.7, laps=4.00, steps=808, pits=1.10 avg
+    d27: reward=655.0, laps=3.75, steps=769, pits=1.30 avg
+    d26: reward=633.0, laps=3.25, steps=634, pits=0.80 avg
+    d21: reward=503.0, laps=3.15, steps=653, pits=1.20 avg
+
+    → d28 random-start IMPROVED: +120 reward over d27, +4 more laps on average
+    → d28 pits slightly less than d27 (1.10 avg vs 1.30) but with better outcomes
+    → Progressive improvement: d21→d26→d27→d28 in random-start reward
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ROOT CAUSE ANALYSIS: WHY FIXED-START IS STILL 1883
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Pattern: d26=1883.41, d27=1883.41, d28=1883.41 on fixed-start.
+  The pit row IS moving (bias: -0.817 → -0.839 → -0.929 across d26/d27/d28).
+  The pit_timing_reward gradient is doing something — but it's not showing up as
+  a better fixed-start result.
+
+  HYPOTHESIS A — Episode ends before delayed pit fires:
+    The fixed-start episode terminates at step 1354 (crash or worn tyres).
+    The agent's pit firing threshold is shifting toward tyre_life=0.30 from 0.35.
+    If the natural pit moment shifts from step X to step X+50, but the episode
+    ends at step X+30, the delayed pit never fires → same reward trajectory.
+
+  HYPOTHESIS B — Pit timing already near-optimal for the fixed-start trajectory:
+    Given the fixed-start dynamics, the current pit timing (tyre_life≈0.35) may
+    already be close to the best achievable within the episode structure.
+    The +100 timing bonus only fires when the agent pits at tyre_life < 0.30,
+    but if the episode ends before tyre_life reaches 0.30, the bonus is unreachable.
+
+  HYPOTHESIS C — More training needed:
+    The bias trend (-0.817 → -0.839 → -0.929) is consistent and moving in the
+    right direction. Another 2M steps with the same setup might push bias to
+    -1.1 or -1.2, shifting the pit boundary enough to earn the timing bonus.
+
+  EVIDENCE SUPPORTING A/B:
+    Fixed-start ep always ends at step 1354 (consistent termination point).
+    Pit fires at approximately the same step each time → no variability.
+    The fixed-start run may be "stuck" in a phase-space trajectory where the
+    timing bonus is geometrically unreachable without more fundamental changes.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHAT WAS CONFIRMED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. LR fix (reset_num_timesteps=True) confirmed working:
+     LR = 9.96e-05 at step 0 (was 3.5e-5 in d27).
+     Pit row moved +5.7% (was +1.1% in d27). approx_kl = 1e-5 to 6e-5 (vs 1e-11).
+
+  2. Three-layer freeze remains perfect over another 2M steps with proper LR:
+     All drift = 0.00e+00. Driving completely unchanged from d26.
+
+  3. Random-start performance continues to improve with more pit_timing_reward training:
+     d26 → d27 → d28 random-start: 633 → 655 → 775. Progressive gain.
+
+  4. The pit bias trend is consistent: more negative = agent waits longer to pit.
+     This is the correct direction (need tyre_life < 0.30 for timing bonus).
+     But the shift hasn't been large enough to change the fixed-start outcome.
+
+  5. No value crisis possible with three-layer freeze (proven across d26/d27/d28).
+     The value function can safely recalibrate to new env without destroying policy.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHAT'S NEXT (D29): More training OR investigate the fixed-start ceiling
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  OPTION A — Continue d28 training (2M more steps from d28.zip):
+    The bias trend is moving in the right direction (-0.929, needs to reach ≈-1.2).
+    Same setup: three-layer freeze, pit_timing_reward env, reset_num_timesteps=True.
+    Hypothesis: with another 2M steps, bias may cross the threshold to earn +100.
+    Risk: if fixed-start is geometrically bounded at 1883, more training won't help.
+
+  OPTION B — Diagnose the fixed-start ceiling first:
+    Run a diagnostic: at what tyre_life does the agent currently pit on fixed-start?
+    What is tyre_life at episode termination?
+    If tyre_life at end > 0.30, the timing bonus IS reachable with more training.
+    If tyre_life at end < 0.30, the agent pits too late already.
+    This diagnostic would confirm or rule out Hypothesis A/B above.
+
+  OPTION C — Increase gradient strength further:
+    The pit row has 130 params. Current LR = 1e-4 → 1e-6 cosine.
+    Could try fixed LR = 3e-4 or 5e-4 for just the pit row params using param groups.
+    This would give 3-5x more gradient to the pit timing decision.
+    Risk: overshooting → agent stops pitting entirely (pit_signal permanently negative).
+
+  Recommended: OPTION B (diagnostic) followed by OPTION A if reachable.
+    Understanding WHY fixed-start is locked at 1883 before committing to more training.
+    If the timing bonus is unreachable from the fixed-start trajectory, pivot to
+    a different approach (e.g., fine-tune with varied starting tyre degradation levels
+    so the training distribution includes the tyre_life=0.30 pit moment more often).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES CREATED/MODIFIED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  New files:
+    rl/train_ppo_pit_v4_d28.py   — training script (reset_num_timesteps=True fix)
+    rl/ppo_pit_v4_d28.zip        — trained model
+    Notes/d28.txt                — this file
+    runs/ppo_pit_v4_d28/         — TensorBoard logs
+
+  Modified:
+    rl/evaluate.py               — d28 entry added
+    Notes/PROGRESS.txt           — d28 results section
