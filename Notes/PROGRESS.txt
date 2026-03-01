@@ -1008,12 +1008,50 @@ SUCCESS CRITERIA MET:
   ✓ pitting maintained (0.70 avg pits random start)
   ✓ no value crisis / no steer collapse (key failure modes of d24/d25 avoided)
 
-WHAT'S NEXT (d27): Now that driving is provably frozen and pitting preserved,
-use pit_timing_reward=True (which was too dangerous before because value crisis
-could destroy driving). Load d26.zip with the SAME three-layer freeze + add
-pit_timing_reward to the env. The timing gradient can now shift the pit row
-decision boundary without any risk to driving.
+WEEK 5 / d27 — Pit v4 D27: Three-Layer Freeze + Pit Timing Reward (PARTIAL SUCCESS)
+==============================================================================
 
-Option A: Load d26 + pit_timing_reward env + same three-layer freeze
-Option B: Train longer (another 2M steps) with same d26 setup
-Option C: Multiple pit stops (extend episode, allow second pit)
+D27 added pit_timing_reward=True to the d26 setup (same three-layer freeze).
+This was safe because driving is fully frozen — no value recalibration crisis possible.
+
+SETUP: Load d26 → three-layer freeze (identical to d26) → make_env_pit_d23 (pit_timing_reward=True)
+       STAGES_PIT_V5 safety net, cosine LR 1e-4→1e-6, 2M steps.
+
+Post-training freeze verification: ALL ZERO (0.00e+00) — even cleaner than d26!
+  throttle row drift = 0.00e+00, steer row drift = 0.00e+00, features = 0.00e+00
+  Pit row barely changed: weight 0.301→0.305 (+1.1%), bias -0.817→-0.839 (-0.022)
+
+Training log: No value crisis (ep_rew positive throughout). approx_kl ≈ 1e-11 to 1e-9.
+  ep_len: 970-1120 steps (slightly LONGER than d26's Stage 2!). std stable 0.741-0.752.
+
+Results (fixed start, N=10):
+  d27: reward=1883.41, laps=7, steps=1354 — IDENTICAL TO D26 TO 2 DECIMAL PLACES
+  d26: reward=1883.41, laps=7, steps=1354
+
+Results (random start, N=20):
+  d27: reward=655, laps=3.75, pits=1.30 avg — HIGHEST PIT COUNT EVER!
+  d26: reward=633, laps=3.25, pits=0.80 avg
+  d21: reward=503, laps=3.15, pits=1.20 avg
+
+WHAT WORKED:
+  ✓ pit_timing_reward env confirmed SAFE with frozen driving (no crisis like d24)
+  ✓ Three-layer freeze stable over another 2M steps in new env
+  ✓ Random-start pitting improved (1.30 avg — highest ever)
+
+WHAT DIDN'T WORK:
+  ✗ Fixed-start reward unchanged (still 1883, same as d26)
+  ✗ Pit timing didn't shift below tyre_life=0.30 on fixed-start run
+  ✗ Pit row barely moved (1.1% weight change vs d26's 145% from d21)
+
+ROOT CAUSE: LR TOO LOW — reset_num_timesteps=False bug
+  SB3 computes progress_remaining = 1 - (num_timesteps / total_timesteps)
+  d26's 3M steps → total = 3M+2M = 5M → progress at start = 1-3/5 = 0.4
+  cosine(1e-4, 1e-6, progress=0.4) ≈ 3.5e-5 (not 1e-4 as intended!)
+  Pit row received 3-35x too little gradient to shift timing boundary.
+
+WHAT'S NEXT (d28): Same setup as d27 but fix the LR issue.
+  Use reset_num_timesteps=True so progress starts at 1.0 (LR = 1e-4).
+  Load d27.zip (most shaped pit row), same three-layer freeze,
+  same pit_timing_reward env, same STAGES_PIT_V5.
+  The pit timing gradient should now have enough strength to push
+  the decision boundary from tyre_life≈0.35 toward ≈0.29.

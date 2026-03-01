@@ -738,6 +738,37 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_pit_v4_d26.zip",
             "env_key":       "pit",
         },
+        {
+            "name":          "PPO Pit v4 D27 (d27)",
+            "color":         "#76FF03",
+            # d27: three-layer freeze + pit_timing_reward=True.
+            # Same freeze as d26 (features + throttle/steer rows + log_std[0,1]).
+            # NOW adds pit_timing_reward: +100 bonus for pitting at tyre_life < 0.30.
+            # Driving frozen → value recalibration crisis CANNOT destroy driving.
+            # Goal: reward > 1883 (d26) with pit at tyre_life ≈ 0.29 (timing improved).
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4_d27.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4_d27.zip",
+            "env_key":       "pit",
+        },
+        {
+            "name":          "PPO Pit v4 D28 (d28)",
+            "color":         "#FF4081",
+            # d28: three-layer freeze + pit_timing_reward + FIXED LR (reset_num_timesteps=True).
+            # D27 had LR bug: reset_num_timesteps=False → LR started at 3.5e-5 (not 1e-4).
+            # D28 fix: reset_num_timesteps=True → LR starts fresh at 1e-4.
+            # Goal: reward > 1883 by shifting pit timing to tyre_life < 0.30 (+100 bonus).
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4_d28.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4_d28.zip",
+            "env_key":       "pit",
+        },
     ]
 
     summaries = []
