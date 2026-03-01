@@ -720,6 +720,24 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_pit_v4_d25.zip",
             "env_key":       "pit",
         },
+        {
+            "name":          "PPO Pit v4 D26 (d26)",
+            "color":         "#FF6D00",
+            # d26: three-layer policy freeze — the minimal trainable parameter set.
+            # Layer 1: Freeze mlp_extractor.policy_net (driving features, 18176 params)
+            # Layer 2: Freeze action_net.weight rows 0,1 + bias[0,1] (throttle/steer rows)
+            # Layer 3: Freeze log_std[0,1] (throttle/steer stds)
+            # Only trainable: action_net.weight[2,:] + bias[2] + log_std[2] (130 params)
+            # Standard env (no pit_timing_reward) + STAGES_PIT_V5 safety net.
+            # Goal: preserve d21 exactly (reward≥1877, pit_count≥1).
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4_d26.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4_d26.zip",
+            "env_key":       "pit",
+        },
     ]
 
     summaries = []
