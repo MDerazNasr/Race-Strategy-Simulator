@@ -115,3 +115,35 @@ def make_env_pit():
     env = F1Env(tyre_degradation=True, pit_stops=True)
     env = Monitor(env)
     return env
+
+
+def make_env_pit_d23():
+    """
+    Creates a pit-stop environment with pit timing reward shaping (Week 5 / d23).
+
+    WHAT'S DIFFERENT vs make_env_pit():
+      - F1Env(tyre_degradation=True, pit_stops=True, pit_timing_reward=True)
+      - Pit timing reward shaping is enabled:
+          tyre_life < 0.3 when agent pits: +100 bonus (net cost = -100)
+          tyre_life > 0.5 when agent pits: -100 extra penalty (net cost = -300)
+          Neutral zone (0.3–0.5): no change (net cost = -200)
+
+    WHY PIT TIMING REWARD? (d22 lesson):
+      d22 showed that the -200 PIT_PENALTY alone is not enough to maintain
+      pitting behavior during fine-tuning. The agent found it more profitable
+      to drive perfectly and skip pitting entirely (+406 reward gain from
+      better driving > pit benefit). Without explicit pit timing incentive,
+      the agent rationally chose "never pit."
+
+      pit_timing_reward adds:
+        1. A POSITIVE signal for pitting at the right time (worn tyres)
+        2. A NEGATIVE signal for pitting at the wrong time (fresh tyres)
+      Together they make correct pit timing explicitly rewarded.
+
+    Used in: rl/train_ppo_pit_v4_d23.py (d23)
+    NOT used in: evaluate.py — evaluation uses standard env_pit (no timing bonus)
+      so that reward numbers are comparable across d21/d22/d23.
+    """
+    env = F1Env(tyre_degradation=True, pit_stops=True, pit_timing_reward=True)
+    env = Monitor(env)
+    return env

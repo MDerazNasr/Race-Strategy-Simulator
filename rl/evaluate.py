@@ -663,6 +663,26 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_pit_v4_cont.zip",
             "env_key":       "pit",
         },
+        {
+            "name":          "PPO Pit v4 D23 (d23)",
+            "color":         "#FF1744",
+            # d23: restart from ppo_pit_v4 (d21) with two fixes to prevent d22 regression:
+            #   Fix A — Pit reward shaping (pit_timing_reward=True in training env):
+            #     tyre_life < 0.3 when agent pits: +100 bonus (net cost = -100)
+            #     tyre_life > 0.5 when agent pits: -100 extra penalty (net cost = -300)
+            #   Fix B — Frozen pit row (gradient hooks zero out action_net row 2):
+            #     action_net.weight[2,:] and action_net.bias[2] and log_std[2] frozen.
+            #     Pit knowledge from d21 is LOCKED; only throttle/steer rows update.
+            # Goal: reward > 2283 (d22) AND pit_count > 0 (unlike d22's 0 pits).
+            # Evaluated in standard env_pit (no timing bonus) for fair comparison.
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4_d23.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4_d23.zip",
+            "env_key":       "pit",
+        },
     ]
 
     summaries = []

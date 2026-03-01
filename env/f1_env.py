@@ -29,7 +29,7 @@ from rl.rewards import RacingReward
 class F1Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30} #info used for rendering
 
-    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False, pit_stops=False, forced_pit_interval=0, forced_pit_threshold=0.0):
+    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False, pit_stops=False, forced_pit_interval=0, forced_pit_threshold=0.0, pit_timing_reward=False):
         super().__init__()
         self.dt = dt #dt = how much simulated time passes each step(). Same as in Car
         self.render_mode = render_mode #render_mode = you'll use this later if you draw stuff
@@ -296,6 +296,37 @@ class F1Env(gym.Env):
         self.pit_count = 0
         self.PIT_PENALTY = -200.0
         self.PIT_COOLDOWN_STEPS = 100
+
+        # ── Pit timing reward shaping (Week 5 / d23) ──────────────────────────
+        # When pit_timing_reward=True, the environment adds shaping rewards to
+        # agent-initiated pit stops based on WHEN the agent decides to pit.
+        #
+        # WHY THIS MATTERS (d22 lesson):
+        #   d22 showed that fine-tuning caused the agent to abandon pitting
+        #   entirely because the -200 PIT_PENALTY was avoidable by driving
+        #   better. Without an explicit incentive to pit at the right time,
+        #   the agent rationally chose "never pit" as the safer strategy.
+        #
+        # HOW IT WORKS (agent_pit only — not forced pits from curriculum):
+        #   tyre_life < 0.3 (worn, correct timing):
+        #     pit_reward += PIT_TIMING_BONUS (+100)
+        #     Net pit cost = -200 + 100 = -100
+        #     Recovers in ~100 steps of improved grip → worth pitting.
+        #   tyre_life > 0.5 (fresh, wrong timing):
+        #     pit_reward -= PIT_EARLY_PENALTY (-100)
+        #     Net pit cost = -200 - 100 = -300
+        #     Very expensive — agent should never pit on fresh tyres.
+        #   0.3 ≤ tyre_life ≤ 0.5 (neutral zone):
+        #     No shaping. Net cost = -200 (unchanged).
+        #
+        # THRESHOLDS (based on tyre wear physics):
+        #   At base_wear=0.0003/step: tyre_life reaches 0.3 at ~step 2333.
+        #   But with slip_coef=0.002, realistic wear is ~0.0007/step total.
+        #   tyre_life = 0.3 at ~step 1000. This matches forced_pit_threshold=0.35
+        #   from d21 Stage 0 — we're rewarding pits just past that threshold.
+        self.pit_timing_reward = pit_timing_reward
+        self.PIT_TIMING_BONUS   = 100.0   # bonus for pitting at correct time
+        self.PIT_EARLY_PENALTY  = 100.0   # extra penalty for pitting too early
     '''
     in RL your agent needs an observation vector each step: a compact summary of whats going on right now
 
@@ -574,6 +605,16 @@ class F1Env(gym.Env):
                 pit_reward = self.PIT_PENALTY
                 self.pit_cooldown_remaining = self.PIT_COOLDOWN_STEPS
                 self.pit_count += 1
+
+                # Pit timing reward shaping (d23): applies ONLY to voluntary pits.
+                # Forced pits (curriculum) get standard PIT_PENALTY only.
+                if self.pit_timing_reward and agent_pit and not time_forced and not state_forced:
+                    if tyre_life_now < 0.3:
+                        # Correct timing: tyres worn enough → bonus, net cost = -100
+                        pit_reward += self.PIT_TIMING_BONUS
+                    elif tyre_life_now > 0.5:
+                        # Wrong timing: tyres still fresh → extra penalty, net cost = -300
+                        pit_reward -= self.PIT_EARLY_PENALTY
 
         if self.pit_cooldown_remaining > 0:
             self.pit_cooldown_remaining -= 1
