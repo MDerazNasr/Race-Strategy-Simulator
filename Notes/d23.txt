@@ -1,0 +1,205 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  d23 — Pit v4 D23: Frozen Pit Row + Pit Reward Shaping                    ║
+║  Week 5                                                                      ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+WHAT WAS BUILT
+==============
+d23 implemented the d22-recommended two-part fix to preserve pit behavior during
+fine-tuning, starting from ppo_pit_v4 (d21, which pitted once correctly).
+
+  Fix A — Pit Reward Shaping (env/f1_env.py + rl/make_env.py):
+    New param: pit_timing_reward=True.
+    For agent-initiated pits only (not forced pits):
+      tyre_life < 0.3 (worn, correct timing): +100 bonus → net cost = -100
+      tyre_life > 0.5 (fresh, wrong timing):  -100 extra → net cost = -300
+      Neutral zone (0.3–0.5): no change → net cost = -200
+
+  Fix B — Frozen Pit Row (gradient hooks in train_ppo_pit_v4_d23.py):
+    Three backward hooks zero gradients for the pit output row (index 2):
+      action_net.weight[2, :] — pit signal mean output weights
+      action_net.bias[2]      — pit signal mean output bias
+      log_std[2]              — pit signal exploration scale
+    Throttle/steer rows [0,1] remain fully trainable.
+    Shared hidden layers (mlp_extractor) also remain trainable.
+
+New files:
+  rl/train_ppo_pit_v4_d23.py  — d23 training pipeline
+  rl/ppo_pit_v4_d23.zip       — trained model
+  Notes/d23.txt               — this file
+
+Modified files:
+  env/f1_env.py               — added pit_timing_reward param + timing logic
+  rl/make_env.py              — added make_env_pit_d23() factory
+  rl/evaluate.py              — added PPO Pit v4 D23 entry
+  Notes/PROGRESS.txt          — updated with d23 results
+
+
+TRAINING ARC
+============
+Starting point: ppo_pit_v4.zip (d21), step ~1M.
+  d21 final: ep_rew_mean ≈ -840 (stochastic over-pitting), ep_len ≈ 1240.
+
+d23 progression (in pit_timing_reward env):
+  Step 1.0M (start):   ep_rew_mean ≈ -813  (d21 endpoint, measured in new env)
+  Step 1.07M:          ep_rew_mean ≈ -1520 (CRISIS: value function recalibrating)
+  Step 1.11M:          ep_len crashes to 104 (agent crashing, gradient disruption)
+  Step 1.15M:          ep_rew_mean recovering: -559 → -359
+  Step 1.43M:          ep_rew_mean ≈ -338, ep_len ≈ 274
+  Step 1.75M:          ep_rew_mean ≈ -42,  ep_len ≈ 274
+  Step 2.4M:           ep_rew_mean ≈ +774, ep_len ≈ 1100 (strong recovery!)
+  Step 2.88M (peak):   ep_rew_mean ≈ +1130, ep_len ≈ 1380 (peak)
+  Step 3.0M (end):     ep_rew_mean ≈ +940, ep_len ≈ 1100
+
+  Total arc: -840 → -1760 (crisis) → +1130 (peak) → +940 (end)
+
+Pit row drift diagnostic (freeze effectiveness):
+  Pre-training:  action_net.weight[2,:] abs_mean = 0.122519
+  Post-training: action_net.weight[2,:] abs_mean = 0.122431
+  Drift = 8.78e-05 — gradient hooks worked. <0.1% change in pit weights.
+
+
+EVALUATION RESULTS
+==================
+
+Fixed start (N=10, deterministic):
+  Policy                   Lap%   Reward  Speed(m/s)  LatErr(m)  Laps  Pits
+  ---------------------------------------------------------------------------
+  PPO Pit v4 (d21)         0.0%   1877    17.59       1.198      7.0    1
+  PPO Pit v4 Cont (d22)    0.0%   2283    18.74       0.182      8.0    0
+  PPO Pit v4 D23 (d23)     0.0%   2174    18.03       0.877      8.0    0
+  Expert (rule-based)     100.0%  2909    17.10       0.797     11.0    -
+  PPO Curriculum v2 (3M)  100.0%  4531    26.92       0.678     17.0    -
+  ---------------------------------------------------------------------------
+
+Random start (N=20):
+  d21: reward=548,  laps=3.20, lateral=1.446, pits=1.0
+  d22: reward=797,  laps=3.20, lateral=0.958, pits=0.2
+  d23: reward=1062, laps=4.15, lateral=0.882, pits=0.0  ← BEST pit policy!
+
+
+DIAGNOSTIC — FIXED START, DETERMINISTIC
+=========================================
+steps=1481, reward=2173.9, laps=8, pit_count=0
+pit_signal: mean=-1.0000, std=0.0000, frac>0=0.0000
+tyre_life at end: 0.208
+
+The agent:
+  - pit_signal collapsed to -1.0000 again (same as d22, same as d18/d19)
+  - Never pits despite tyre_life reaching 0.208 (deeply worn)
+  - Achieves 2174 reward in 1481 steps across 8 laps WITHOUT pitting
+
+
+WHAT HAPPENED: PARTIAL FREEZE FAILURE
+=======================================
+The gradient hooks successfully froze the pit OUTPUT ROW weights (drift < 0.01%).
+But they did NOT freeze the SHARED HIDDEN LAYERS (mlp_extractor).
+
+The pit output is computed as:
+  pit_mean = action_net.weight[2, :] @ mlp_extractor_output + action_net.bias[2]
+
+With frozen output weights but FREE hidden layers:
+  - The mlp_extractor updated to optimize the new reward landscape
+  - The feature representation (mlp_extractor_output) changed significantly
+  - The frozen weights × new features = different output than d21 expected
+  - Result: pit_signal collapsed to -1.0000 even though the weights were preserved
+
+This is the fundamental issue with partial freezing in shared representations:
+  d21 learned: "weight[2, :] @ old_features = pit_signal > 0"
+  d23 trained: mlp_extractor → different old_features changed
+  d23 result:  weight[2, :] @ new_features = pit_signal ≈ -1.0
+
+The freeze worked at the weight level but not at the behavioral level.
+
+WHY D23 IS STILL BETTER THAN D22 (RANDOM START)
+=================================================
+Despite failing to preserve pitting, d23 outperforms d22 in random start:
+  d22: reward=797, laps=3.20, lateral=0.958
+  d23: reward=1062, laps=4.15, lateral=0.882
+
+Why? The pit_timing_reward training environment has a slightly different gradient
+landscape than d22's standard env. Training with explicit pit timing penalties
+(+100 for correct timing, -100 for early pitting) may have regularized the
+driving behavior differently. D23 is not just d22 with frozen weights — the
+pit_timing_reward environment shaped the hidden layers toward more robust driving.
+
+D23 achieves the BEST random-start performance among all pit policies.
+
+LESSONS FROM D23
+================
+1. Output-row freezing with shared representations doesn't preserve behavior.
+   The frozen weights are not the bottleneck — the shared features are.
+   To truly freeze the pit behavior, you'd need to freeze the entire pit subgraph
+   (from input to output, including the hidden layers that feed only into pit).
+   This requires separate networks for pit and driving decisions.
+
+2. Pit reward shaping without behavioral anchoring is insufficient.
+   The +100 timing bonus was designed to create incentives for correct pitting.
+   But if the mlp_extractor restructures to avoid pitting entirely, no bonus
+   threshold can trigger (because pit_signal never crosses 0).
+   The incentive exists but the pit "gate" stays closed.
+
+3. The crisis period (ep_rew_mean: -840 → -1760, ep_len: 1260 → 104) was real.
+   Starting from d21 weights in a DIFFERENT environment (pit_timing_reward=True)
+   caused temporary catastrophic failure because the value function was
+   miscalibrated. It took ~500k steps to recover. The agent eventually
+   recovered by finding a new stable policy — which excluded pitting.
+
+4. D23 is the best random-start pit policy despite having 0 pits.
+   The pit_timing_reward training environment produced more robust driving
+   even though the intended pit behavior was not maintained.
+
+5. To truly combine pitting with improved driving, we need a safety net that
+   GUARANTEES pit experiences remain in the training distribution at all times.
+   Pure gradient hooks on output rows cannot provide this guarantee.
+
+
+D24 DESIGN
+==========
+The key insight across d21-d23: the agent needs ONGOING pit experience in
+the training distribution throughout fine-tuning. Once pit experiences stop
+(Stage 3 of any curriculum), the agent loses the pit association quickly.
+
+SOLUTION: Graduated forced-pit threshold with timing reward.
+  Never fully remove forced pits. Instead, keep a low threshold permanently
+  that provides a "safety net" of pit experiences, while the timing reward
+  incentivizes the agent to pit VOLUNTARILY before reaching that threshold.
+
+Stage 0 (500k steps):  Start from ppo_pit_v4 (d21).
+                         forced_pit_threshold = 0.30 (fires ~step 1000)
+                         pit_timing_reward = True (+100 for voluntary pit at < 0.30)
+                         → Agent starts pitting at tyre_life ≈ 0.35 (d21's behavior)
+                         → Timing bonus incentivizes slightly earlier voluntary pitting
+                         → Forced threshold at 0.30 acts as safety net
+
+Stage 1 (1M steps):    forced_pit_threshold = 0.20 (fires ~step 1140)
+                         pit_timing_reward = True
+                         → Agent must pit voluntarily at tyre_life 0.20–0.30 to avoid
+                           the forced threshold. The +100 bonus makes voluntary pitting
+                           at < 0.30 cheaper than the neutral -200 forced pit.
+                         → Forced threshold at 0.20 is low enough that the agent
+                           has incentive to beat it with voluntary pitting.
+
+Stage 2 (500k steps):  forced_pit_threshold = 0.10 (fires very late ~step 1286)
+                         pit_timing_reward = True
+                         → By now, agent has strong voluntary pitting reflex.
+                         → Forced threshold is a fallback for edge cases only.
+
+The agent cannot escape pit experiences at any stage — the forced threshold
+always ensures at least one pit per episode. This prevents the gradual
+forgetting seen in d22/d23 while also rewarding the agent for learning
+the correct timing voluntarily.
+
+KEY DIFFERENCES from d21/d22/d23:
+  - Forced pits never fully removed (threshold stays ≥ 0.10)
+  - Timing reward active from Stage 0 (not just after voluntary pitting emerges)
+  - No freeze (avoids the hidden-layer representation mismatch problem)
+  - Starting from d21 (pit behavior intact)
+
+
+PROGRESSION SUMMARY
+===================
+  d21: BREAKTHROUGH — pit once at right time (reward=1877, 1 pit, lat=1.198 m)
+  d22: EXPLOITATION — best driving but pitting lost (reward=2283, 0 pits, lat=0.182 m)
+  d23: PARTIAL FIX  — best random-start performance (reward=1062), pitting still lost
+  d24: Goal — graduated safety net prevents forgetting (reward > 2283, pits > 0)

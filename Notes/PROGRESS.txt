@@ -815,25 +815,68 @@ d22 is the best DRIVER in the table (0.182 m lateral error, beats Expert!)
 but makes the wrong STRATEGY (ignores worn tyres at tyre_life=0.210 at episode end).
 
 ==============================================================================
-WHAT'S NEXT (suggested -- d23)
+WEEK 5 / d23 — Pit v4 D23: Frozen Pit Row + Pit Reward Shaping
 ==============================================================================
 
-Goal: combine d21's pit discovery with d22's driving quality.
-Central problem: fine-tuning overwrites pit behavior. Need explicit incentives.
+Attempted the d22-recommended combined fix (Option A + B):
+  Fix A — pit_timing_reward=True in F1Env:
+           tyre_life < 0.3: +100 bonus (net pit cost = -100)
+           tyre_life > 0.5: -100 extra penalty (net pit cost = -300)
+  Fix B — Gradient hooks freezing pit row (action_net row 2 + log_std[2])
 
-Best options:
-  A. Restart from d21 + pit reward shaping in RacingReward:
-     Add: +R when pit fires AND tyre_life < 0.3 (correct timing incentive)
-     Start from ppo_pit_v4 (already knows how to pit once).
-     Fine-tune with new reward — agent should maintain pitting AND improve driving.
+Training arc (pit_timing_reward env, starting from d21):
+  Step 1.0M (start):  ep_rew_mean ≈ -813  (d21 endpoint)
+  Step 1.1M:          CRISIS: ep_rew_mean → -1760, ep_len → 104 (crashing)
+                       [value function recalibration in new env]
+  Step 1.75M:         ep_rew_mean ≈ -42   (recovering)
+  Step 2.88M (peak):  ep_rew_mean ≈ +1130 (peak)
+  Step 3.0M (end):    ep_rew_mean ≈ +940
 
-  B. Freeze pit output row during fine-tuning:
-     Freeze action_net.weight[2] and action_net.bias[2] (the pit row).
-     Driving/value network updates; pit policy locked at d21's correct behavior.
+Results (fixed start, N=10):
+  d23: Reward=2174, LatErr=0.877 m, Laps=8, Speed=18.03 m/s, Pits=0
 
-  C. Longer episodes (max_steps=4000):
-     Two-stop strategy becomes optimal. Agent might re-discover pitting
-     when a single tyre stint is not enough for the full episode.
+  d21 (for context): Reward=1877, LatErr=1.198 m, Laps=7, Pits=1
+  d22 (for context): Reward=2283, LatErr=0.182 m, Laps=8, Pits=0
 
-Recommended: Option A (d21 + pit reward shaping).
-  Most direct path to combined goal.
+Random start (N=20):
+  d23: reward=1062 ← BEST pit policy!, laps=4.15, lateral=0.882 m, pits=0
+  d22: reward=797,  laps=3.20, lateral=0.958 m, pits=0.2
+
+Outcome: PARTIAL SUCCESS
+  - Fixed pit row (drift 8.78e-05) but pitting STILL LOST.
+  - Root cause: shared mlp_extractor features changed, frozen output weights
+    now compute pit_signal < 0 with new hidden features.
+    Freezing the output row doesn't freeze behavior when representation changes.
+  - d23 is BEST random-start pit policy (1062 reward, 4.15 laps) despite 0 pits.
+    pit_timing_reward env produced more robust driving than standard fine-tuning.
+
+Diagnostic:
+  pit_signal: mean=-1.0000, std=0.0000, frac>0=0.0000 (same as d22, d18, d19)
+  tyre_life at end: 0.208 (deeply worn, agent ignores it)
+
+WHAT'S NEXT (suggested -- d24)
+==============================================================================
+
+Core insight from d21-d23: the agent needs ONGOING pit experience throughout
+fine-tuning. Once pit experiences stop (threshold=0.0), the pit association
+is lost in ~2M steps regardless of freezing or reward shaping.
+
+SOLUTION — Graduated safety-net approach (never fully remove forced pits):
+  Start from ppo_pit_v4 (d21, pit behavior intact).
+  Add pit_timing_reward=True throughout.
+  Use 3-stage curriculum that keeps forced_pit_threshold ≥ 0.10 always:
+
+  Stage 0 (500k):  forced_pit_threshold=0.30 (fires ~step 1000)
+                    Agent starts pitting voluntarily at tyre_life ≈ 0.35 (d21).
+                    Timing bonus (+100) incentivizes voluntary pitting at < 0.30.
+                    Forced threshold at 0.30 = safety net.
+
+  Stage 1 (1M):    forced_pit_threshold=0.20 (fires ~step 1140)
+                    Agent incentivized to pit voluntarily before reaching 0.20.
+                    Voluntary pit at < 0.30 → net -100 (better than forced -200).
+
+  Stage 2 (500k):  forced_pit_threshold=0.10 (safety net only, very late)
+                    Agent has strong voluntary pitting reflex by now.
+
+  Key: forced pits NEVER go to 0.0 → pit experiences always in distribution
+       → value function never forgets that pitting is beneficial
