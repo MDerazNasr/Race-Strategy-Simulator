@@ -585,6 +585,142 @@ STAGES_PIT_V4: List[CurriculumStage] = [
 
 
 # =============================================================================
+# PIT STRATEGY V5 CURRICULUM  (d24)
+# =============================================================================
+#
+# PROBLEM (d22/d23 failure analysis):
+#   Both d22 (continued training) and d23 (frozen pit row) lost pit behavior.
+#   Root cause: once forced pits are removed (threshold=0.0), the pit
+#   association fades because pit experiences leave the training distribution.
+#   The agent finds an easier local optimum — drive well, skip pitting.
+#
+#   d22 (2M fine-tune, no forced pits):
+#     pit_signal → -1.0, 0 pits. Better driving (+1890 reward gain)
+#     outweighed the pit benefit. Exploitation over exploration.
+#
+#   d23 (frozen pit row + pit_timing_reward):
+#     Pit row weights frozen (drift 8.78e-05), but mlp_extractor features
+#     changed → frozen_weights × new_features = pit_signal < 0 always.
+#     Freezing the output row doesn't freeze behavior in a shared network.
+#
+# THE D24 FIX — PERMANENT SAFETY NET (never remove forced pits entirely):
+#   Key insight: the agent needs ongoing pit experiences in the training
+#   distribution at ALL stages of fine-tuning, not just early bootstrapping.
+#
+#   STAGE 0 (threshold=0.25): Agent starts pitting voluntarily at tyre_life
+#     ≈ 0.35 (d21's natural timing). Safety net at 0.25 = backup only;
+#     fires ONLY if voluntary pitting regresses. Agent's 0.35 pit > 0.25
+#     threshold means it naturally beats the net.
+#
+#     Timing bonus (pit_timing_reward=True in env):
+#       Voluntary pit at 0.35: neutral zone (0.3 ≤ 0.35 ≤ 0.5) → no bonus
+#       Gradient signal: "pit at 0.29 → -100 net instead of -200 net"
+#       → agent learns to delay slightly to earn the +100 bonus
+#
+#   STAGE 1 (threshold=0.15): Agent should now pit voluntarily at ~0.29
+#     (just below 0.30) to earn the timing bonus. Safety net at 0.15 is
+#     a deep backup — only fires if voluntary pitting collapses to 0.0.
+#     The gap 0.15–0.30 requires the agent to cover 150+ steps on its own.
+#
+#   STAGE 2 (threshold=0.08): Very late safety net. At tyre_life < 0.08,
+#     the car is almost undriveable (10% grip floor). Any functional policy
+#     should have pitted long before this. Safety net is purely theoretical
+#     at this point — the agent must self-manage pit decisions.
+#
+# WHY THIS IS DIFFERENT FROM D21's STAGES_PIT_V4:
+#   STAGES_PIT_V4: threshold → 0.0 in Stage 2 (forced pits fully removed)
+#     → pit experiences leave distribution → agent forgets over 2M steps
+#   STAGES_PIT_V5: threshold ≥ 0.08 always (safety net never fully removed)
+#     → pit experiences always possible in distribution → no forgetting
+#
+# STAGE SCHEDULE (2M total steps from d21's ~1M checkpoint):
+#   Stage 0: ~500k steps  (245 rollouts × 2048 = 501,760 steps)
+#   Stage 1: ~1M steps    (488 rollouts × 2048 = 999,424 steps)
+#   Stage 2: ~500k steps  (never graduates — runs until total_timesteps)
+#
+# COMBINED WITH: pit_timing_reward=True (via make_env_pit_d23)
+#   Explicit positive signal for voluntary pit at tyre_life < 0.30:
+#     +100 bonus → net cost = -100 (recovers in ~100 steps of better grip)
+#   Explicit negative signal for early pit at tyre_life > 0.50:
+#     -100 penalty → net cost = -300 (never worth it)
+#
+STAGES_PIT_V5: List[CurriculumStage] = [
+
+    # -- Stage 0: Safety net at 0.25, ~500k steps ----------------------------
+    # D21's natural voluntary pit: tyre_life ≈ 0.35 (before threshold fires).
+    # Forced threshold at 0.25 = backup; fires ONLY if voluntary pitting fades.
+    # pit_timing_reward bonus zone (< 0.30): agent incentivised to delay
+    # from 0.35 → 0.29 for the +100 timing bonus.
+    #
+    # Graduation: grad_lap_rate=0.0 → any survival rate passes.
+    # grad_window=245 → 245 × 2048 ≈ 500k steps.
+    CurriculumStage(
+        name                 = "Stage 0 -- Safety Net 0.25 (~500k steps)",
+        max_accel            = 15.0,
+        forced_pit_threshold = 0.25,   # safety net: fires when tyre_life < 0.25
+        forced_pit_interval  = 0,
+        reward_kwargs        = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.1,
+            lateral_weight    = 0.5,
+            heading_weight    = 0.1,
+            smoothness_weight = 0.05,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 0.0,   # graduate after filling the window
+        grad_window   = 245,   # 245 × 2048 ≈ 500k steps
+    ),
+
+    # -- Stage 1: Safety net at 0.15, ~1M steps ------------------------------
+    # By now the agent should be pitting voluntarily at tyre_life ~0.29
+    # (just inside the +100 timing bonus zone).
+    # Forced threshold at 0.15 = deep backup only.
+    # Gap 0.15–0.30: agent must cover 150+ steps of worn tyres on its own.
+    # This builds the voluntary pitting reflex while the safety net catches
+    # any regression below 0.15.
+    CurriculumStage(
+        name                 = "Stage 1 -- Safety Net 0.15 (~1M steps)",
+        max_accel            = 15.0,
+        forced_pit_threshold = 0.15,   # deep backup: fires when tyre_life < 0.15
+        forced_pit_interval  = 0,
+        reward_kwargs        = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.1,
+            lateral_weight    = 0.5,
+            heading_weight    = 0.1,
+            smoothness_weight = 0.05,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 0.0,   # graduate after filling the window
+        grad_window   = 488,   # 488 × 2048 ≈ 1M steps
+    ),
+
+    # -- Stage 2: Safety net at 0.08, ~500k steps ----------------------------
+    # Theoretical safety net only. tyre_life < 0.08 means grip = 0.1 × mu_base
+    # (10% grip floor) — car is nearly undriveable. Any functional policy will
+    # have pitted long before reaching 0.08. The agent must fully self-manage
+    # pit decisions; the threshold is just an emergency catch.
+    # Never graduates — runs for remaining ~500k steps.
+    CurriculumStage(
+        name                 = "Stage 2 -- Safety Net 0.08 (~500k steps)",
+        max_accel            = 15.0,
+        forced_pit_threshold = 0.08,   # emergency net: almost-dead tyres only
+        forced_pit_interval  = 0,
+        reward_kwargs        = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.1,
+            lateral_weight    = 0.5,
+            heading_weight    = 0.1,
+            smoothness_weight = 0.05,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 1.1,   # never graduates — runs until total_timesteps
+        grad_window   = 9999,
+    ),
+]
+
+
+# =============================================================================
 # CURRICULUM CALLBACK
 # =============================================================================
 

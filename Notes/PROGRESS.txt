@@ -854,29 +854,73 @@ Diagnostic:
   pit_signal: mean=-1.0000, std=0.0000, frac>0=0.0000 (same as d22, d18, d19)
   tyre_life at end: 0.208 (deeply worn, agent ignores it)
 
-WHAT'S NEXT (suggested -- d24)
+==============================================================================
+WEEK 5 / d24 — Pit v4 D24: Safety-Net Curriculum — CATASTROPHIC FAILURE
 ==============================================================================
 
-Core insight from d21-d23: the agent needs ONGOING pit experience throughout
-fine-tuning. Once pit experiences stop (threshold=0.0), the pit association
-is lost in ~2M steps regardless of freezing or reward shaping.
+Hypothesis: keep forced_pit_threshold > 0 at ALL stages so pit experiences
+never leave the training distribution (permanent safety-net).
 
-SOLUTION — Graduated safety-net approach (never fully remove forced pits):
-  Start from ppo_pit_v4 (d21, pit behavior intact).
-  Add pit_timing_reward=True throughout.
-  Use 3-stage curriculum that keeps forced_pit_threshold ≥ 0.10 always:
+Ingredients:
+  - Start from d21 (ppo_pit_v4.zip, pit behavior intact)
+  - Environment: make_env_pit_d23 (pit_timing_reward=True)
+  - Curriculum: STAGES_PIT_V5 — safety net never goes to 0.0
+      Stage 0 (~500k steps): forced_pit_threshold=0.25
+      Stage 1 (~1M steps):   forced_pit_threshold=0.15
+      Stage 2 (~500k steps): forced_pit_threshold=0.08 (never graduates)
+  - LR: cosine 1e-4 → 1e-6, 2M steps
 
-  Stage 0 (500k):  forced_pit_threshold=0.30 (fires ~step 1000)
-                    Agent starts pitting voluntarily at tyre_life ≈ 0.35 (d21).
-                    Timing bonus (+100) incentivizes voluntary pitting at < 0.30.
-                    Forced threshold at 0.30 = safety net.
+Training arc (3.0M total = d21 1M + 2M fine-tune):
+  Step 1.0M (start): ep_rew_mean = -813  (CRISIS: pit_timing_reward recalibration)
+  Step ~1.5M:        DEEPER CRISIS: ep_rew_mean = -1470, ep_len collapses
+  Step ~2.0M (Stage 1): ep_rew_mean = +533 (Stage 1, recovering)
+  Step 3.0M (end):   ep_rew_mean = +842, rolling_rate=0.506 (training "looked fine")
 
-  Stage 1 (1M):    forced_pit_threshold=0.20 (fires ~step 1140)
-                    Agent incentivized to pit voluntarily before reaching 0.20.
-                    Voluntary pit at < 0.30 → net -100 (better than forced -200).
+Evaluation (fixed start, N=10 deterministic):
+  D24: reward=-2.1, laps=0, steps=23, pit_count=0  ← CATASTROPHIC
 
-  Stage 2 (500k):  forced_pit_threshold=0.10 (safety net only, very late)
-                    Agent has strong voluntary pitting reflex by now.
+  Context: d20 (previous worst) crashed in 7 steps with reward=-17.9
+           d24 crashes in 23 steps — similar catastrophe
 
-  Key: forced pits NEVER go to 0.0 → pit experiences always in distribution
-       → value function never forgets that pitting is beneficial
+Post-training diagnostic:
+  First deterministic action: [throttle=1.0, steer=-0.74, pit=-1.0]
+  steer std = 0.144 (very low — highly CONFIDENT in hard left steer from step 1)
+  → Agent applies max throttle + hard left turn at race start → instant crash
+
+ROOT CAUSE:
+  Loading d21 into pit_timing_reward env triggers value recalibration crisis.
+  During crisis (ep_rew_mean = -1470), gradient updates destroyed steer output.
+  Steer collapsed to -0.74 hard left with std=0.144 (wrong with high confidence).
+  Stochastic training (throttle std=0.654) masked this — mean action is degenerate.
+
+  THE KEY FAILURE: "Good training ep_rew_mean" ≠ "Good deterministic evaluation"
+  Stochastic policy can mask a degenerate deterministic mean.
+
+  Combined signals (safety net + curriculum transitions + pit_timing_reward)
+  were MORE disruptive than d23 (which had only pit_timing_reward). The extra
+  complexity deepened the crisis and prevented driving recovery.
+
+WHAT'S NEXT (d25)
+==============================================================================
+
+ROOT CAUSE FIX for d25: Two-part solution to the convergence barrier.
+
+Fix 1 — Return to standard env (no pit_timing_reward):
+  D21 was trained on standard pit env. Loading d21 into SAME env → NO value
+  recalibration crisis. D22 showed this works (standard env, 2283 reward, no crisis).
+
+Fix 2 — Freeze mlp_extractor.policy_net entirely:
+  All driving behavior lives in mlp_extractor.policy_net (hidden features).
+  Freeze ALL parameters → driving cannot regress (no gradient touches it).
+  Only action_net (3D output head) trains:
+    action_net.weight[2,:], bias[2] → pit signal (improve timing)
+    action_net.weight[0,1,:], bias[0,1] → throttle/steer (can also freeze)
+  Frozen driving features → deterministic policy PRESERVED from d21.
+
+Combined with STAGES_PIT_V5:
+  Safety net at 0.25/0.15/0.08 keeps pit experiences in distribution.
+  Voluntary pit experiences + safety net backup → no forgetting.
+
+Expected:
+  - At worst: d21 quality preserved (1877 reward, 7 laps, 1 pit)
+  - At best: d21 quality + refined pit timing

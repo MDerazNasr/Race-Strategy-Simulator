@@ -664,6 +664,23 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "env_key":       "pit",
         },
         {
+            "name":          "PPO Pit v4 D24 (d24)",
+            "color":         "#76FF03",
+            # d24: safety-net curriculum (STAGES_PIT_V5) — forced pits never removed.
+            # Start from ppo_pit_v4 (d21). pit_timing_reward=True throughout.
+            # Stage 0 (~500k): forced_pit_threshold=0.25 (backup below d21's 0.35 pit)
+            # Stage 1 (~1M):   forced_pit_threshold=0.15 (deep backup, refine timing)
+            # Stage 2 (~500k): forced_pit_threshold=0.08 (emergency net only)
+            # Goal: reward > 2283 (d22) AND pit_count > 0 (unlike d22/d23).
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4_d24.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4_d24.zip",
+            "env_key":       "pit",
+        },
+        {
             "name":          "PPO Pit v4 D23 (d23)",
             "color":         "#FF1744",
             # d23: restart from ppo_pit_v4 (d21) with two fixes to prevent d22 regression:
@@ -681,6 +698,26 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             ),
             "optional":      True,
             "optional_file": "ppo_pit_v4_d23.zip",
+            "env_key":       "pit",
+        },
+        {
+            "name":          "PPO Pit v4 D25 (d25)",
+            "color":         "#00E5FF",
+            # d25: frozen driving features + safety-net curriculum + standard env.
+            # Fix 1 — Standard pit env (NO pit_timing_reward): same env as d21 →
+            #   no value recalibration crisis (d24's root cause eliminated).
+            # Fix 2 — Frozen mlp_extractor.policy_net: driving features locked →
+            #   deterministic driving CANNOT regress (d24's steer collapse prevented).
+            # Only action_net (3D output head) trains: can refine pit timing.
+            # Curriculum: STAGES_PIT_V5 (safety net 0.25→0.15→0.08, never 0.0).
+            # LR: cosine 5e-5 → 5e-7 (lower — only action_net trains).
+            # Goal: preserve d21 driving (reward≥1877, pit_count≥1).
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4_d25.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4_d25.zip",
             "env_key":       "pit",
         },
     ]
