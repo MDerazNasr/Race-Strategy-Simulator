@@ -1,0 +1,165 @@
+D27: Three-Layer Freeze + Pit Timing Reward — PARTIAL SUCCESS
+===============================================================
+
+DATE: 2026-03-01
+STATUS: PARTIAL SUCCESS — driving preserved, pitting increased (random), but no fixed-start improvement
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHAT WAS BUILT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+D27 is the first experiment to use pit_timing_reward=True with frozen driving.
+
+D26 proved that three-layer freeze preserves driving and pitting while loading into
+the standard env. The question for D27: now that driving is frozen, can we safely
+add pit_timing_reward=True (which destroyed driving in d24)?
+
+SETUP:
+  Starting point: ppo_pit_v4_d26.zip (d26 — driving frozen, pit row adapted)
+  Environment: make_env_pit_d23 (pit_timing_reward=True)
+    - tyre_life < 0.30 when pitting: +100 bonus (net cost = -100)
+    - tyre_life > 0.50 when pitting: -100 extra (net cost = -300)
+    - Neutral zone 0.30–0.50: no change (net cost = -200)
+  Three-layer freeze: identical to d26 (features + throttle/steer rows + log_std[0,1])
+  Only 130 policy params trainable: action_net.weight[2,:] + bias[2] + log_std[2]
+  STAGES_PIT_V5: safety net 0.25→0.15→0.08
+  LR: cosine 1e-4→1e-6 (but see LR ISSUE below)
+  Total steps: 2M
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+POST-TRAINING DIAGNOSTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Freeze verification vs d26 (should all be 0.0):
+    mlp_extractor.policy_net drift  = 0.00e+00  (PERFECT — even better than d26's 0.000)
+    action_net.weight[0,:] drift   = 0.00e+00  (PERFECT)
+    action_net.weight[1,:] drift   = 0.00e+00  (PERFECT)
+
+  Weight changes (training output):
+    throttle row: 0.049886 → 0.049886  (IDENTICAL — frozen)
+    steer row:    0.027054 → 0.027054  (IDENTICAL — frozen)
+    pit row:      0.301152 → 0.304543  (+1.1% — minimal change)
+    pit bias:    -0.816575 → -0.839003  (-0.022 — slightly more negative)
+    pit std:      0.550875 (not printed post-train, assume similar)
+
+  Key insight: pit row barely moved despite 2M steps + pit_timing_reward gradient.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TRAINING LOG
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  No value crisis! ep_rew_mean consistently positive (350-720) throughout all 3 stages.
+  approx_kl: 1e-11 to 1e-5 (essentially zero — policy barely changing)
+  std: stable at 0.741-0.752 throughout — no collapse
+  ep_len_mean: 970-1120 — actually LONGER than d26's Stage 2 (875-1000)!
+
+  Stage progression:
+    Stage 0 (threshold=0.25): iterations 1-245 (~500k steps)
+    Stage 1 (threshold=0.15): iterations 246-733 (~1M steps)
+    Stage 2 (threshold=0.08): iterations 734-976 (~500k steps, final)
+
+  Final Stage 2 ep_rew_mean: 350-490 (training env = pit_timing_reward, lower than eval)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EVALUATION RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Fixed-Start (N=10, deterministic):
+    d27: reward=1883.41, laps=7, steps=1354, speed=17.61, lat_err=1.148
+    d26: reward=1883.41, laps=7, steps=1354, speed=17.61, lat_err=1.148
+    → d27 IS IDENTICAL TO D26 TO 2 DECIMAL PLACES
+
+  Random-Start (N=20, deterministic):
+    d27: reward=655, laps=3.75, steps=769, pits=1.30 avg
+    d26: reward=633, laps=3.25, steps=633, pits=0.80 avg
+    d21: reward=503, laps=3.15, steps=653, pits=1.20 avg
+
+    → d27 pits MORE than d26 (1.30 avg vs 0.80) — most pitting ever in random start!
+    → d27 marginally more reward than d26 (+22) and more laps (+0.5) in random start
+    → But fixed-start timing unchanged (still 1883, same as d26)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ROOT CAUSE ANALYSIS: LR TOO LOW (reset_num_timesteps issue)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Expected LR: starts at 1e-4 (cosine schedule initial_lr=1e-4)
+  ACTUAL LR:   started at 3.5e-5 (already 3/5 of the way through cosine decay!)
+
+  WHY: reset_num_timesteps=False means SB3 continues from d26's accumulated step count.
+       SB3 computes progress_remaining = 1 - (num_timesteps / total_timesteps)
+       With d26's ~3M steps and total_timesteps = 3M + 2M = 5M:
+         progress_remaining = 1 - 3M/5M = 0.4 at d27's start!
+         cosine(1e-4, 1e-6, progress=0.4) ≈ 3.5e-5
+
+  CONSEQUENCE: The pit row only received a gradient at 3.5e-5 → 1e-6 LR,
+               instead of the intended 1e-4 → 1e-6. This is 3-35x too low.
+               The 130 pit-row params had insufficient gradient to shift
+               the pit timing boundary from tyre_life≈0.35 to ≈0.30.
+
+  EVIDENCE: Pit row weight change = +1.1% over 2M steps (should be much more with 1e-4).
+            Compare d26 pit row change: +145% over 2M steps from d21's lower LR.
+            d26 started at higher LR (d21's ~1M steps → 1 - 1M/3M = 0.67 → 7.5e-5),
+            and also had a larger "untrained" pit row to shape.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHAT WAS CONFIRMED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. pit_timing_reward=True with frozen driving = NO VALUE CRISIS.
+     ep_rew_mean was positive throughout (vs d24's -1470 crisis). CONFIRMED SAFE.
+
+  2. Three-layer freeze is perfectly stable over 2M more steps in a new env.
+     Drift = 0.000 for all driving params.
+
+  3. Higher pitting frequency in random starts (1.30 avg) suggests the
+     pit_timing_reward gradient shifted the pit decision boundary slightly
+     to fire from more starting positions, even with the low LR.
+
+  4. No improvement in fixed-start performance — the timing at tyre_life≈0.35
+     is unchanged on the fixed-start trajectory.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WHAT'S NEXT (D28): Fix the LR issue
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  D27 confirmed that pit_timing_reward is safe with frozen driving.
+  The missing ingredient was sufficient LR to shift the pit decision boundary.
+
+  D28 FIX: reset_num_timesteps=True (LR cosine restarts from 1e-4)
+    OR use a fixed higher LR (e.g., 3e-4) since all 36k driving params are frozen
+    and the optimizer only needs to update 130 pit params + 18k value params.
+
+  OPTION A — reset_num_timesteps=True + cosine 1e-4→1e-6:
+    Progress starts at 1.0 (not 0.4). LR starts at 1e-4.
+    Same cosine decay shape over 2M steps.
+    Downside: TensorBoard step counter resets (minor).
+
+  OPTION B — Fixed LR 3e-4 for all 2M steps:
+    With only 130 policy params, high LR is safe (no dramatic policy changes expected).
+    The value function also benefits from higher LR (18k params adapting).
+    Downside: no decay → might oscillate in late training.
+
+  OPTION C — Load d27, use reset_num_timesteps=True + same pit_timing_reward:
+    Cumulative training: d21 → d26 → d27 → d28.
+    Each step the pit row has been shaped a little more.
+    The pit bias is now -0.839 (slightly more negative than d26's -0.817).
+
+  Recommended: OPTION A (reset_num_timesteps=True + cosine 1e-4→1e-6)
+    - Start from d27.zip (has 4M+ steps of pit row shaping)
+    - reset_num_timesteps=True so LR starts at 1e-4
+    - Same three-layer freeze, same pit_timing_reward env
+    - Same STAGES_PIT_V5
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES CREATED/MODIFIED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  New files:
+    rl/train_ppo_pit_v4_d27.py   — training script
+    rl/ppo_pit_v4_d27.zip        — trained model
+    Notes/d27.txt                — this file
+    runs/ppo_pit_v4_d27/         — TensorBoard logs
+
+  Modified:
+    rl/evaluate.py               — d27 entry added
+    Notes/PROGRESS.txt           — d27 results section
