@@ -1,0 +1,213 @@
+==============================================================================
+D25: Frozen Driving Features — PARTIAL SUCCESS (driving degraded, pitting lost)
+==============================================================================
+Date:   2026-03-01
+Status: PARTIAL — better than d24 (750 steps vs 23 steps), but worse than d21
+Model:  rl/ppo_pit_v4_d25.zip
+Logs:   runs/ppo_pit_v4_d25/
+
+------------------------------------------------------------------------------
+WHAT WAS BUILT
+------------------------------------------------------------------------------
+D25 implemented the two-part fix identified in d24's post-mortem:
+  Fix 1 — Standard env (NO pit_timing_reward): same env as d21 → no value crisis
+  Fix 2 — Freeze mlp_extractor.policy_net entirely: driving features locked
+
+The key insight: frozen mlp_extractor.policy_net prevents value recalibration
+from destroying the FEATURES, while allowing the output heads (action_net) to
+refine pit timing.
+
+Implementation:
+  - Start from d21 (ppo_pit_v4.zip, 1 pit, reward=1877)
+  - Environment: make_env_pit (standard, NO pit_timing_reward) — same as d21's env
+  - Frozen: mlp_extractor.policy_net (18,176 params, requires_grad=False)
+  - Trainable: action_net (all 3 rows: throttle, steer, pit) + log_std + value layers
+  - Curriculum: STAGES_PIT_V5 (safety net 0.25→0.15→0.08)
+  - LR: cosine 5e-5→5e-7, 2M steps, reset_num_timesteps=False
+
+------------------------------------------------------------------------------
+TRAINING LOG
+------------------------------------------------------------------------------
+Stage 0 (threshold=0.25, ~500k steps):
+  ep_len_mean = 1220-1310 (driving intact! d21 eval was 1359 steps)
+  rolling_rate = 78-87% (excellent)
+  ep_rew_mean = -800 to -850 (negative due to pit costs + training distribution)
+  std = 0.876-0.93 (high entropy, no collapse)
+  NO CRISIS at all — same env as d21, value function doesn't recalibrate
+
+Stage 1 (threshold=0.15, ~1M steps):
+  [Continued training, gradual evolution]
+
+Stage 2 (threshold=0.08, ~500k steps):
+  ep_len_mean = 163 (CATASTROPHIC collapse!)
+  rolling_rate = 0.0 (zero lap completion)
+  ep_rew_mean = +171 (positive: short drives with progress reward)
+  std = 0.77 (down from 0.93 in Stage 0 — confidence increased)
+  LR decayed to ~4e-6
+
+Final diagnostics (post-training):
+  mlp_extractor.policy_net drift = 0.000 (PERFECTLY frozen — better than d23!)
+  action_net.weight[2,:] abs_mean = 0.227 (was 0.123) — pit row updated
+  log_std[2] = 0.220 (was 0.758) — pit std decreased
+
+------------------------------------------------------------------------------
+EVALUATION RESULTS (fixed start, N=10 deterministic)
+------------------------------------------------------------------------------
+  D25: reward=1275.8, speed=21.41 m/s, lat_err=1.343 m, steps=750, laps=5, pits=0
+
+  Comparison:
+    D21: reward=1877, speed=17.59 m/s, lat_err=1.198 m, steps=1359, laps=7, pits=1
+    D22: reward=2283, speed=18.74 m/s, lat_err=0.182 m, steps=1469, laps=8, pits=0
+    D23: reward=2174, speed=18.03 m/s, lat_err=0.877 m, steps=1481, laps=8, pits=0
+    D24: reward=-2.1, 23 steps (catastrophic)
+
+  D25 is much better than d24 (750 steps vs 23 steps, no crashing on step 1)
+  D25 is worse than d21 (5 laps vs 7 laps, 0 pits vs 1 pit)
+  D25 drives FASTER than d21 (21.4 vs 17.6 m/s) but crashes earlier (step 750)
+
+Post-training model inspection:
+  log_std:        [-0.060, -2.089, 0.220]
+  std:            [0.941,  0.124,  1.246]
+  First action:   [throttle=0.131, steer=1.000, pit=-1.000]
+  steer std = 0.124 — confident hard-right steer from step 1
+
+------------------------------------------------------------------------------
+ROOT CAUSE ANALYSIS
+------------------------------------------------------------------------------
+
+D25 PARTIALLY SOLVED D24'S PROBLEM:
+  - Froze mlp_extractor.policy_net (0.000 drift) → features identical to d21
+  - Used same env as d21 → no value crisis (ep_rew_mean never crashed like d23/d24)
+  - Training was STABLE in Stage 0 (ep_len=1220-1310, rolling_rate=78-87%)
+  - No catastrophic 23-step crash like d24
+
+D25 STILL FAILED BECAUSE:
+  The frozen features are just INPUTS to action_net. Even with frozen inputs,
+  action_net can still learn different output mappings. Specifically:
+
+  action_net.weight = shape (3, 128):
+    Row 0 (throttle): TRAINABLE — learned to produce throttle=0.131 (low throttle)
+    Row 1 (steer):    TRAINABLE — learned to produce steer=1.0 with std=0.124
+    Row 2 (pit):      TRAINABLE — learned slightly different pit behavior
+
+  The gradient signal for pit timing (from forced pit experiences at threshold 0.25/0.15/0.08)
+  propagated into throttle and steer rows through shared optimizer updates. Over 2M steps:
+    1. Throttle converged to 0.131 (very low throttle — "cautious" driving)
+    2. Steer converged to 1.0 with std=0.124 (hard right with high confidence)
+    3. These wrong actions still survive stochastic training (high throttle std=0.94
+       covers the variance), but fail deterministically
+
+  Stage 2 collapse (ep_len=163) happened when steer confidence increased (std=0.12)
+  and the deterministic steer=1.0 started causing crashes at different track positions.
+
+THE FUNDAMENTAL ISSUE:
+  Freezing mlp_extractor.policy_net is NECESSARY but NOT SUFFICIENT.
+  Features must be frozen AND the throttle/steer OUTPUT ROWS must be frozen.
+
+  Without freezing throttle/steer rows, the gradient from:
+    - Value function updates (what throttle/steer gives more reward?)
+    - Pit experience gradient (pit at threshold → value update → action update)
+  ...can still corrupt the throttle/steer mapping over 2M steps.
+
+WHY D25 DIDN'T DEGRADE AS FAST AS D24:
+  D24: pit_timing_reward env → value recalibration crisis immediately
+       → driving destroyed in thousands of steps (shown as ep_len=23 at eval)
+  D25: same env as d21 → no crisis
+       → driving degraded SLOWLY over 2M steps (ep_len=1300 → 163)
+       → Stage 0 was good, Stage 1/2 eventually degraded
+
+  The frozen features bought ~1.5M steps of good behavior before action_net drifted.
+
+------------------------------------------------------------------------------
+WHAT D26 MUST DO DIFFERENTLY
+------------------------------------------------------------------------------
+
+THREE-LAYER FREEZE (the only true solution):
+
+Layer 1 — Freeze mlp_extractor.policy_net (features):
+  Same as d25. Driving features completely preserved. (0.000 drift achieved)
+
+Layer 2 — Freeze action_net.weight[0,:] and action_net.weight[1,:] (throttle/steer):
+  Freeze the throttle and steer output rows via gradient hooks.
+  This guarantees the throttle/steer mapping is identical to d21's.
+  The steer=1.0 collapse CANNOT happen if the steer row is frozen.
+
+Layer 3 — Allow action_net.weight[2,:] to train (pit row):
+  The ONLY trainable policy parameter. The pit row can refine pit timing.
+  D21 pits at tyre_life≈0.35; the gradient from safety-net experiences
+  can reinforce or refine this without affecting throttle/steer.
+
+Additionally:
+  - Also freeze log_std[0] and log_std[1] (throttle/steer stds)
+  - Allow log_std[2] to train (pit exploration std)
+  - Also freeze action_net.bias[0] and bias[1]
+  - Allow action_net.bias[2] to train
+
+  Value layers remain UNFROZEN: mlp_extractor.value_net and value_net
+  can adapt without affecting the policy.
+
+Implementation: gradient hooks on action_net.weight (zero rows 0 and 1),
+  action_net.bias (zero elements 0 and 1), and log_std (zero elements 0 and 1).
+  PLUS requires_grad=False on mlp_extractor.policy_net (cleaner approach).
+
+Env: pit_timing_reward=True (make_env_pit_d23) OR standard (make_env_pit)?
+  With frozen throttle/steer + frozen features, the value crisis from
+  pit_timing_reward CANNOT destroy driving — all driving parameters are locked.
+  Consider using pit_timing_reward=True to add timing gradient to pit row.
+  The value function will recalibrate (crisis period) but policy won't regress.
+
+Expected:
+  - Driving: GUARANTEED identical to d21 (all driving params frozen)
+  - Pitting: should maintain d21's 1 pit/episode behavior
+  - Timing: might improve slightly with pit_timing_reward gradient
+  - Reward: ≈ d21's 1877 (driving preserved) or better if pit timing improves
+
+------------------------------------------------------------------------------
+LESSONS LEARNED
+------------------------------------------------------------------------------
+1. Freezing features (mlp_extractor.policy_net) is NECESSARY but NOT SUFFICIENT.
+   Output rows (throttle/steer) must ALSO be frozen to prevent drift over 2M steps.
+
+2. Action_net row gradient bleeding: when training pit row, the shared Adam
+   optimizer state for throttle/steer rows still sees gradient signal (from value
+   function updates), which can slowly corrupt those rows over 2M steps.
+
+3. Stochastic training masks deterministic failures. D25 had ep_len=1300 in Stage 0
+   (stochastic) but ep_len=163 in Stage 2 (when steer std collapsed to 0.12 and
+   the bad deterministic steer became visible).
+
+4. The freeze must cover ALL policy dimensions EXCEPT the one we want to change.
+   For pit timing: freeze everything EXCEPT action_net.weight[2,:], bias[2], log_std[2].
+
+5. The frozen mlp_extractor.policy_net approach (requires_grad=False) works PERFECTLY
+   — achieved 0.000 drift. Combine this with gradient hooks on action_net rows 0,1.
+
+------------------------------------------------------------------------------
+PROGRESS ON PIT TIMING PROBLEM
+------------------------------------------------------------------------------
+d18-d20: Never pitted (various bootstrap failures)
+d21:     BREAKTHROUGH — pitted once at tyre_life=0.35 (1877 reward, 7 laps)
+d22:     Lost pitting — fine-tuning drove better but forgot to pit (2283 reward)
+d23:     Lost pitting — frozen output row didn't freeze behavior (mlp_extractor drifted)
+d24:     CATASTROPHIC — value crisis destroyed driving (23 steps)
+d25:     PARTIAL — frozen features helped (750 steps vs 23), but throttle/steer
+         degraded over 2M steps. 5 laps, 0 pits, 1275 reward.
+d26 plan: Freeze ALL policy except pit row → guaranteed driving preservation
+
+WHAT'S NEXT: D26
+==============================================================================
+Implementation details:
+  1. Load d21 (ppo_pit_v4.zip)
+  2. requires_grad=False on mlp_extractor.policy_net (features)
+  3. Gradient hooks on action_net to zero rows 0,1 of weight and elements 0,1 of bias
+  4. Gradient hook on log_std to zero elements 0 and 1
+  5. Environment: consider pit_timing_reward=True (value can recalibrate, policy can't regress)
+     OR stay with standard env (simpler, no crisis, maintains d21 behavior)
+  6. Curriculum: STAGES_PIT_V5 (safety net)
+  7. LR: 1e-4 → 1e-6 (higher now, since only 130 params train — can afford higher LR)
+  8. 2M steps
+
+Files:
+  rl/train_ppo_pit_v4_d26.py
+  rl/ppo_pit_v4_d26.zip
+  Notes/d26.txt
