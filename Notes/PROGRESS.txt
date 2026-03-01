@@ -1049,9 +1049,47 @@ ROOT CAUSE: LR TOO LOW — reset_num_timesteps=False bug
   cosine(1e-4, 1e-6, progress=0.4) ≈ 3.5e-5 (not 1e-4 as intended!)
   Pit row received 3-35x too little gradient to shift timing boundary.
 
-WHAT'S NEXT (d28): Same setup as d27 but fix the LR issue.
-  Use reset_num_timesteps=True so progress starts at 1.0 (LR = 1e-4).
-  Load d27.zip (most shaped pit row), same three-layer freeze,
-  same pit_timing_reward env, same STAGES_PIT_V5.
-  The pit timing gradient should now have enough strength to push
-  the decision boundary from tyre_life≈0.35 toward ≈0.29.
+WEEK 5 / d28 — Pit v4 D28: Three-Layer Freeze + Pit Timing Reward + Fixed LR (PARTIAL SUCCESS)
+==============================================================================
+
+D28 fixed d27's reset_num_timesteps=False LR bug. With reset_num_timesteps=True,
+the cosine LR schedule restarts from progress=1.0 → LR = 1e-4 at step 0.
+Confirmed: LR = 9.96e-05 at d28 start (was 3.5e-5 in d27).
+
+SETUP: Load d27.zip → three-layer freeze (identical to d26/d27) → make_env_pit_d23
+       (pit_timing_reward=True) → STAGES_PIT_V5 → cosine 1e-4→1e-6, 2M steps.
+
+Post-training freeze verification: ALL ZERO (0.00e+00) — same as d27.
+  throttle row drift = 0.00e+00, steer row drift = 0.00e+00, features = 0.00e+00
+  Pit row moved more: weight 0.305→0.322 (+5.7% vs d27's +1.1%), bias -0.839→-0.929
+  approx_kl: 1e-5 to 6e-5 (vs d27's 1e-11 — confirms LR fix gave real gradient)
+
+Results (fixed start, N=10):
+  d28: reward=1883.41, laps=7, steps=1354 — STILL IDENTICAL TO D26/D27
+  d27: reward=1883.41, laps=7, steps=1354
+  d26: reward=1883.41, laps=7, steps=1354
+  → Three consecutive experiments all giving exactly 1883.41 (fixed-start ceiling)
+
+Results (random start, N=20):
+  d28: reward=774.7, laps=4.00, steps=808, pits=1.10 avg  (BEST RANDOM START)
+  d27: reward=655.0, laps=3.75, steps=769, pits=1.30 avg
+  d26: reward=633.0, laps=3.25, steps=634, pits=0.80 avg
+  → Progressive improvement: d21(503) → d26(633) → d27(655) → d28(775)
+
+Pit bias trajectory: d21=+0.006 → d26=-0.817 → d27=-0.839 → d28=-0.929
+  The bias is consistently moving more negative (agent learning to delay pitting).
+  This is the correct direction for earning the timing bonus (needs tyre_life < 0.30).
+  But the fixed-start episode ends at 1354 steps regardless — the ceiling holds.
+
+ROOT CAUSE of fixed-start plateau:
+  The fixed-start episode always terminates at step 1354. The pit fires at the same
+  tyre_life each time. If the timing bonus requires tyre_life < 0.30 but the episode
+  ends before the delayed pit fires, the bonus is geometrically unreachable from the
+  fixed-start trajectory alone.
+
+WHAT'S NEXT (d29): Diagnose the fixed-start ceiling before more training.
+  Run a step-by-step diagnostic on d28: at what tyre_life does the pit fire?
+  What is tyre_life at episode termination?
+  If timing bonus IS reachable → continue training (Option A: 2M more steps).
+  If timing bonus is NOT reachable from fixed-start → change training distribution
+  (e.g., random tyre_life starts so pit_timing_reward fires during training).
