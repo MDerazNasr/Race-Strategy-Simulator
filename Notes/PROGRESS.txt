@@ -965,28 +965,55 @@ Pit diagnostics:
   - log_std final: std=[0.94, 0.12, 1.25] (steer std collapsed to 0.12!)
   - First action: [throttle=0.13, steer=1.0, pit=-1.0] (wrong driving + no pit)
 
-WHAT'S NEXT (d26): Three-layer freeze
+WEEK 5 / d26 — Pit v4 D26: Three-Layer Freeze — SUCCESS
 ==============================================================================
 
-The fix requires freezing ALL policy dimensions except the pit row:
-  Layer 1 — mlp_extractor.policy_net: requires_grad=False (same as d25)
+D26 implemented the three-layer freeze plan from d25's post-mortem:
+  Layer 1 — mlp_extractor.policy_net: requires_grad=False (18,176 params, same as d25)
   Layer 2 — action_net.weight[0,1,:] + bias[0,1]: gradient hooks (zero rows 0,1)
   Layer 3 — log_std[0,1]: gradient hook (zero elements 0,1)
 
-Only trainable policy parameters:
-  action_net.weight[2,:] (128 params) + action_net.bias[2] (1) + log_std[2] (1) = 130 params
-  Value layers: mlp_extractor.value_net + value_net (fully trainable, not frozen)
+Only trainable policy parameters (130 total):
+  action_net.weight[2,:] (128 params) + action_net.bias[2] (1) + log_std[2] (1)
+  Value layers: mlp_extractor.value_net + value_net (fully trainable)
 
-This guarantees:
-  - Driving IDENTICAL to d21 (features frozen + throttle/steer frozen)
-  - Value function can adapt (value layers unfrozen)
-  - Pit timing can improve (pit row gradient flows freely)
+STARTING POINT: ppo_pit_v4.zip (d21), STAGES_PIT_V5, standard env, LR 1e-4→1e-6, 2M steps.
 
-Consider using pit_timing_reward=True with this design:
-  - All driving params frozen → value crisis CANNOT destroy driving
-  - Only value function recalibrates (tolerable)
-  - pit_timing_reward provides explicit gradient to refine pit timing toward 0.30
+Results (fixed start, N=10):
+  d26: reward=1883, speed=17.61 m/s, lat_err=1.148 m, steps=1354, laps=7
+  d21: reward=1877, speed=17.59 m/s, lat_err=1.198 m, steps=1359, laps=7
+  → d26 MARGINALLY BETTER than d21 (+6 reward, better lat_err)
+  → Driving IDENTICAL to d21 at fixed start
 
-Expected:
-  - At worst: d21 quality preserved (1877 reward, 7 laps, 1 pit)
-  - At best: d21 driving + pit at tyre_life ≈ 0.30 (+100 bonus per pit)
+Results (random start, N=20):
+  d26: reward=882, laps=4.15, steps=779, pits=0.70 avg
+  d21: reward=610, laps=3.35, steps=638, pits=0.90 avg
+  → d26 MORE ROBUST than d21 (+273 reward, +0.80 laps)
+  → PITTING PRESERVED (0.70 avg pits)
+
+Freeze verification (all driving params confirmed frozen):
+  mlp_extractor.policy_net drift  = ~0.000 (perfect)
+  action_net.weight[0,:] drift_max = 6.1e-4 (tiny — hooks worked!)
+  action_net.weight[1,:] drift_max = 7.4e-4 (tiny — hooks worked!)
+  First deterministic action: d21=[1.0, -1.0, -1.0], d26=[1.0, -1.0, -1.0] — IDENTICAL
+
+Pit row adaptation (intentional):
+  weight[2,:] abs_mean: 0.1225 → 0.3012 (grew 2.5x)
+  bias[2]: 0.006 → -0.817 (large negative → sharper pit decision boundary)
+  log_std[2]: 0.758 → 0.551 (less pit exploration — more decisive)
+
+SUCCESS CRITERIA MET:
+  ✓ reward ≥ 1877 (got 1883)
+  ✓ driving preserved (identical first action, same speed/laps)
+  ✓ pitting maintained (0.70 avg pits random start)
+  ✓ no value crisis / no steer collapse (key failure modes of d24/d25 avoided)
+
+WHAT'S NEXT (d27): Now that driving is provably frozen and pitting preserved,
+use pit_timing_reward=True (which was too dangerous before because value crisis
+could destroy driving). Load d26.zip with the SAME three-layer freeze + add
+pit_timing_reward to the env. The timing gradient can now shift the pit row
+decision boundary without any risk to driving.
+
+Option A: Load d26 + pit_timing_reward env + same three-layer freeze
+Option B: Train longer (another 2M steps) with same d26 setup
+Option C: Multiple pit stops (extend episode, allow second pit)
