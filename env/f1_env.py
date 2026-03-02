@@ -29,7 +29,7 @@ from rl.rewards import RacingReward
 class F1Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30} #info used for rendering
 
-    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False, pit_stops=False, forced_pit_interval=0, forced_pit_threshold=0.0, pit_timing_reward=False):
+    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False, pit_stops=False, forced_pit_interval=0, forced_pit_threshold=0.0, pit_timing_reward=False, voluntary_pit_reward=False, voluntary_pit_threshold=0.60):
         super().__init__()
         self.dt = dt #dt = how much simulated time passes each step(). Same as in Car
         self.render_mode = render_mode #render_mode = you'll use this later if you draw stuff
@@ -327,6 +327,37 @@ class F1Env(gym.Env):
         self.pit_timing_reward = pit_timing_reward
         self.PIT_TIMING_BONUS   = 100.0   # bonus for pitting at correct time
         self.PIT_EARLY_PENALTY  = 100.0   # extra penalty for pitting too early
+
+        # ── Voluntary pit reward shaping (Week 5 / d30) ───────────────────────
+        # When voluntary_pit_reward=True, the environment gives a bonus when the
+        # agent CHOOSES to pit (pit_signal > 0) while tyres are worn.
+        #
+        # WHY THIS IS DIFFERENT FROM pit_timing_reward (d23):
+        #   pit_timing_reward gives +100 when tyre_life < 0.30 — a threshold that
+        #   is geometrically unreachable from the fixed-start trajectory (crash at
+        #   step 1354 with tyre_life ≈ 0.35). The gradient consistently pushed pit
+        #   bias negative (d26→d29) because forced pits fired when the agent was
+        #   already outputting pit_signal < 0.
+        #
+        #   voluntary_pit_reward uses a HIGHER threshold (0.60) that is reachable
+        #   well before the crash (step ~643 on fixed-start), AND gives a larger
+        #   bonus (+300) that makes voluntary pitting IMMEDIATELY PROFITABLE:
+        #     Net voluntary pit cost: -200 (penalty) + 300 (bonus) = +100
+        #     Plus: fresh tyres → survive to step 2000 → +800 more reward
+        #     Total advantage: +900 vs crashing at step 1354
+        #
+        # KEY DIFFERENCE FROM FORCED PITS (root cause of d26–d29 failure):
+        #   This bonus only fires when pit_signal > 0 (AGENT'S OWN CHOICE).
+        #   PPO directly sees: (worn_tyre_state, pit_signal > 0) → positive reward.
+        #   Gradient correctly reinforces pit_signal > 0 at worn-tyre states.
+        #   No forced pit → no gradient going the wrong direction.
+        #
+        # EXPLORATION: pit_std ≈ 2.1 from d21 (log_std[2]=0.76, exp(0.76)=2.13).
+        #   With pit_bias ≈ 0 (d21 near-zero), P(pit_signal > 0) ≈ 50% each step.
+        #   → Agent discovers the bonus within the first few episodes naturally.
+        self.voluntary_pit_reward    = voluntary_pit_reward
+        self.voluntary_pit_threshold = voluntary_pit_threshold
+        self.VOLUNTARY_PIT_BONUS     = 300.0   # net cost of voluntary pit: -200+300=+100
     '''
     in RL your agent needs an observation vector each step: a compact summary of whats going on right now
 
@@ -615,6 +646,16 @@ class F1Env(gym.Env):
                     elif tyre_life_now > 0.5:
                         # Wrong timing: tyres still fresh → extra penalty, net cost = -300
                         pit_reward -= self.PIT_EARLY_PENALTY
+
+                # Voluntary pit reward (d30): bonus for CHOOSING to pit when tyres worn.
+                # Only fires for agent-initiated pits (pit_signal > 0), NOT forced pits.
+                # net cost = PIT_PENALTY + VOLUNTARY_PIT_BONUS = -200 + 300 = +100.
+                # Directly rewards the correct (state, action) pair so PPO gradient
+                # reinforces pit_signal > 0 at worn-tyre states — fixes the forced-pit
+                # gradient flaw discovered in d26–d29.
+                if self.voluntary_pit_reward and agent_pit and not time_forced and not state_forced:
+                    if tyre_life_now < self.voluntary_pit_threshold:
+                        pit_reward += self.VOLUNTARY_PIT_BONUS
 
         if self.pit_cooldown_remaining > 0:
             self.pit_cooldown_remaining -= 1

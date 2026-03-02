@@ -117,6 +117,40 @@ def make_env_pit():
     return env
 
 
+def make_env_pit_d30():
+    """
+    Creates a pit-stop environment with voluntary pit reward shaping (Week 5 / d30).
+
+    WHAT'S DIFFERENT vs make_env_pit():
+      - F1Env(tyre_degradation=True, pit_stops=True, voluntary_pit_reward=True)
+      - Voluntary pit reward: +300 bonus when agent's OWN pit_signal > 0 fires
+        AND tyre_life < 0.60 (worn-tyre zone). No forced pit at all.
+
+    WHY VOLUNTARY PIT REWARD? (d26–d29 lesson):
+      Forced pits (d21–d29) fire regardless of the agent's pit_signal. This means
+      the advantage from a forced pit flows back to whatever action the agent
+      happened to choose — usually pit_signal < 0 (negative bias). The gradient
+      then reinforces pit_signal < 0: bias went +0.006 → -0.817 → -1.217 across
+      d26/d27/d28/d29. Wrong direction every time.
+
+      voluntary_pit_reward fires ONLY when pit_signal > 0 (agent's choice).
+      Net cost: -200 (penalty) + 300 (bonus) = +100 → immediate profit from pitting.
+      Plus: fresh tyres → survive to step 2000 → ~+800 more reward.
+      PPO sees: (worn_tyre_state, pit_signal > 0) → high reward → correct gradient.
+
+    THRESHOLD 0.60 (reachable from fixed-start trajectory):
+      tyre_life reaches 0.60 at step ~571 on fixed-start — well before the
+      crash at step 1354. Agent can voluntarily pit from step 571 onwards.
+      D21 pit_std ≈ 2.13 (log_std=0.76), bias ≈ +0.006 → P(pit>0) ≈ 50%.
+      → Agent discovers the voluntary pit bonus within the first few episodes.
+
+    Used in: rl/train_ppo_pit_v4_d30.py (d30)
+    """
+    env = F1Env(tyre_degradation=True, pit_stops=True, voluntary_pit_reward=True)
+    env = Monitor(env)
+    return env
+
+
 def make_env_pit_d23():
     """
     Creates a pit-stop environment with pit timing reward shaping (Week 5 / d23).
