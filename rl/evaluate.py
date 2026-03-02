@@ -799,6 +799,21 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_pit_v4_d30.zip",
             "env_key":       "pit",
         },
+        {
+            "name":  "PPO Pit v4 D31 (d31)",
+            "color": "#7B1FA2",
+            # D31: load d21 + BC pre-train pit row to be state-conditional + PPO fine-tune.
+            # Fixes d30's early over-exploration problem: BC initializes pit_signal > 0 at
+            # tyre_life < 0.55 and pit_signal < 0 at tyre_life > 0.65 BEFORE PPO starts.
+            # Guaranteed correct gradient direction from first training episode.
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4_d31.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4_d31.zip",
+            "env_key":       "pit",
+        },
     ]
 
     summaries = []
