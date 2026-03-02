@@ -769,6 +769,21 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_pit_v4_d28.zip",
             "env_key":       "pit",
         },
+        {
+            "name":  "PPO Pit v4 D29 (d29)",
+            "color": "#00E5FF",
+            # D29: load d21 + three-layer freeze + STAGES_PIT_V6 (higher thresholds).
+            # Thresholds 0.50/0.45/0.38 fire BEFORE the fixed-start crash (step 1354).
+            # Diagnostic: forced pit at tyre_life<0.40 gives 2697 reward (vs 1883).
+            # Goal: voluntary pit at tyre_life ≈ 0.40–0.50 → reward > 2000.
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4_d29.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4_d29.zip",
+            "env_key":       "pit",
+        },
     ]
 
     summaries = []

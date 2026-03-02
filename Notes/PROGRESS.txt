@@ -1093,3 +1093,54 @@ WHAT'S NEXT (d29): Diagnose the fixed-start ceiling before more training.
   If timing bonus IS reachable → continue training (Option A: 2M more steps).
   If timing bonus is NOT reachable from fixed-start → change training distribution
   (e.g., random tyre_life starts so pit_timing_reward fires during training).
+
+==============================================================================
+WEEK 5 / d29 — Pit v4 D29: STAGES_PIT_V6 + Load D21 — CEILING HOLDS
+==============================================================================
+
+Diagnostic (diagnose_d28.py) confirmed root cause of 1883.41 ceiling:
+  - D28 NEVER pits voluntarily on fixed-start (pit_signal=-1.0 throughout all 1354 steps)
+  - Crash at step 1354 is TYRE-INDUCED: obs[11]=tyre_life changes throttle/steer
+    at the critical corner. Fresh tyres (after pit) → agent navigates safely.
+  - STAGES_PIT_V5 thresholds (0.25/0.15/0.08) NEVER fire on fixed-start (crash at 0.35)
+  - A forced pit at tyre_life=0.50 (step 1116) unlocks reward=2701, 11 laps, 2000 steps!
+
+D29 designed fix: STAGES_PIT_V6 with thresholds 0.50/0.45/0.38, all firing BEFORE crash.
+  Load d21 (bias=+0.006, not d26-d28 with bias=-0.929). Standard env (no pit_timing_reward).
+
+SETUP: Load d21.zip → three-layer freeze → make_env_pit (standard) → STAGES_PIT_V6
+       → cosine 3e-4→1e-6 (LR from d21's stored lr_schedule), 2M steps, 977 iterations.
+
+Results (fixed start, N=10):
+  d29: reward=1885.32, laps=7, steps=1353 — ESSENTIALLY SAME CEILING (+1.91 vs d28)
+  d28: reward=1883.41, laps=7, steps=1354
+  → Forced-pit curriculum at higher thresholds still failed to teach voluntary pitting.
+
+Results (random start, N=20):
+  d29: reward=532.59 ± 961.95, laps=3.15, steps=700, pits=1.25 avg
+  d28: reward=464.61, laps=2.70, pits=0.85 avg (d26 was best at 979.42)
+  → Slight improvement over d28, but far below d26.
+
+Post-training pit stats:
+  Pit weight: 0.1225 → 0.3476 (+183% — much more responsive pit row)
+  Pit bias:   +0.0060 → -1.2172 (WRONG DIRECTION — worse than d28's -0.929)
+  Features drift: 0.00e+00 (perfect freeze)
+
+ROOT CAUSE — GRADIENT DIRECTION FLAW (see Notes/d29.txt for full analysis):
+  The forced_pit_threshold fires the pit REGARDLESS of the agent's pit_signal.
+  Agent typically outputs pit_signal < 0 (negative bias). When forced pit fires:
+    - Forced pit → agent survives longer → POSITIVE advantage
+    - But advantage is credited to the agent's CHOSEN action: pit_signal < 0
+    - Gradient says: "low pit_signal at worn-tyre state → positive advantage → REINFORCE low pit_signal"
+    - Result: bias spirals MORE negative: d21=+0.006 → d26=-0.817 → d28=-0.929 → d29=-1.217
+  D21 was LUCKY: BC features happened to output pit_signal > 0 at worn-tyre states,
+  so the gradient reinforced the correct direction.
+
+WHAT'S NEXT (d30): Fix the gradient direction — redesign the training signal for pit_signal.
+  Option B (recommended): Intrinsic reward for voluntary pitting.
+    In F1Env reward: when pit fires AND agent's pit_signal > 0: +R_voluntary (e.g., +300)
+    Penalize: tyre_life < 0.50 AND pit_signal < 0: -small per-step penalty
+    Remove forced pit (rely on reward shaping + exploration).
+    This directly trains: "choosing pit at worn tyre → high reward."
+  Option A: BC pre-train pit row to output +2.0 at tyre_life < 0.55, -2.0 at > 0.70.
+            Then PPO fine-tuning — guarantees gradient goes right direction.
