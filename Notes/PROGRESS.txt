@@ -1210,3 +1210,34 @@ WHAT'S NEXT (d32): Architectural fix — direct tyre_life → pit_signal connect
   Custom feature extractor appending tyre_life to 128-dim features (129-dim total).
   Initialize pit_weight[128] = -10.0 (direct tyre_life→pit connection).
   Keeps d21 driving intact; gives pit row direct access to tyre_life for state-conditioning.
+
+==============================================================================
+WEEK 5 / d32 — Pit v4 D32: PitAwarePolicy — BREAKTHROUGH! 1883 ceiling broken
+==============================================================================
+
+Architecture: Custom SB3 policy (PitAwarePolicy) with TyrLifeAugmentedExtractor.
+  - TyrLifeAugmentedExtractor: overrides latent_dim_pi 128→129, appends obs[11] in forward_actor
+  - PitAwarePolicy: uses TyrLifeAugmentedExtractor via _build_mlp_extractor()
+  - action_net: Linear(129, 3) — 129th input = tyre_life directly
+  - Init: W_pit[128]=-10.0, b_pit=+7.0 → state-conditional from episode 1, no BC needed
+  - Same three-layer freeze (now for 129-dim action_net rows 0,1), 131 trainable params
+  - Voluntary pit reward (make_env_pit_d30), LR cosine(1e-4→1e-6), 2M steps
+
+Training: ep_rew_mean crossed positive at iter 35, reached +976 by iter 977 (470 sec).
+Post-training: W_pit[128]=-10.49 (barely moved), b_pit=+6.50, log_std[2]=0.76→-0.15 (certain).
+Pit probabilities: tl=0.45→98%, tl=0.60→59%, tl=0.80→1%, tl=0.90→0%.
+
+Results (fixed start, N=10):
+  d32: reward=2683.83, laps=11, steps=2000, pits=1.0, completion=100% ← BREAKTHROUGH!
+  Previous best: d29=1885 / d21=1877 — the 1883 ceiling held for d21-d31 (11 experiments).
+  → +798 reward improvement (+42%), survived to step 2000 for first time, 11 laps (vs 7).
+
+Results (random start, N=20):
+  d32: reward=1296.08 ± 1180.08, laps=6.35, completion=45%
+  Previous best: d28=1012.07 — d32 beats all prior pit policies by +284.
+
+Key insight — WHY D32 WORKED:
+  Frozen features separate worn/fresh states by only 3.25% (feature bottleneck from d31).
+  PitAwarePolicy bypasses this: obs[11] is appended DIRECTLY to the 128-dim latent.
+  The 129th action_net weight provides a guaranteed linear path from tyre_life to pit_signal.
+  Gradient direction was positive throughout training for the first time.

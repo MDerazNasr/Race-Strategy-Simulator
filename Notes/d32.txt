@@ -1,0 +1,184 @@
+==============================================================================
+WEEK 5 / d32 — Pit v4 D32: Direct Tyre-Life Connection — BREAKTHROUGH!
+==============================================================================
+
+DATE: 2026-03-02
+STATUS: COMPLETE (2M steps, 470 seconds)
+
+==============================================================================
+WHAT WAS BUILT
+==============================================================================
+
+D32 implemented a custom SB3 policy (PitAwarePolicy) that provides a direct
+linear connection from tyre_life (obs[11]) to the pit_signal output, bypassing
+the feature bottleneck that defeated d26–d31.
+
+ROOT CAUSE OF D26–D31 FAILURES:
+  The frozen mlp_extractor features do NOT encode tyre_life in a linearly
+  separable form for the pit row. BC probe (d31) showed:
+    - Worn states (tl < 0.55): pit_signal mean = -0.222 (target +2.0)
+    - Fresh states (tl > 0.65): pit_signal mean = -0.090 (target -2.0)
+    - Separation: 3.25% of required target — FEATURE BOTTLENECK confirmed.
+  D21's pitting was likely random exploration (50% pit rate), not state-conditional.
+
+THE D32 FIX — PitAwarePolicy with TyrLifeAugmentedExtractor:
+  New class: TyrLifeAugmentedExtractor (rl/pit_aware_policy.py)
+    - Inherits MlpExtractor, overrides latent_dim_pi: 128 → 129
+    - forward_actor(obs) = cat([policy_net(obs), obs[11]])  ← 129-dim
+    - Action net automatically created as Linear(129, 3) by SB3's _build()
+
+  New class: PitAwarePolicy (rl/pit_aware_policy.py)
+    - Inherits ActorCriticPolicy, overrides _build_mlp_extractor()
+    - Uses TyrLifeAugmentedExtractor instead of standard MlpExtractor
+    - Transparent to all other SB3 code (save/load, rollout, evaluate all work)
+
+  Initialization:
+    action_net.weight[2, :128] = d21's existing pit row weights (copied)
+    action_net.weight[2,  128] = -10.0  ← DIRECT tyre_life → pit (negative)
+    action_net.bias[2]         = +7.0   ← threshold at tl ≈ 0.69 (adjusted)
+    action_net.weight[0:2, 128] = 0.0   ← throttle/steer: no tyre_life effect
+    All other weights: copied from d21
+
+  Result at initialization (tl direct component only):
+    tl=0.30: pit_signal ≈ +4.0  P(pit>0) ≈ 97%  ← always pit (critical)
+    tl=0.45: pit_signal ≈ +2.5  P(pit>0) ≈ 88%  ← usually pit (worn)
+    tl=0.60: pit_signal ≈ +1.0  P(pit>0) ≈ 68%  ← often pit (bonus zone edge)
+    tl=0.80: pit_signal ≈ -1.0  P(pit>0) ≈ 32%  ← rarely pit (fresh)
+    tl=0.90: pit_signal ≈ -2.0  P(pit>0) ≈ 17%  ← almost never pit (new tyre)
+
+THREE-LAYER FREEZE (same as d26-d31, extended for 129-dim action_net):
+  1. mlp_extractor.policy_net: requires_grad=False (18,176 params)
+  2. action_net rows 0,1 (throttle, steer): gradient hooks — ALL 129 cols frozen
+  3. log_std dims 0,1: gradient hook
+
+TRAINABLE (131 policy params):
+  action_net.weight[2, :] = all 129 pit row weights (features + tyre_life)
+  action_net.bias[2] + log_std[2]
+
+==============================================================================
+TRAINING LOG
+==============================================================================
+
+Setup:
+  Start checkpoint: ppo_pit_v4.zip (d21, pit_bias=+0.006)
+  New model: PPO(PitAwarePolicy) with d21 weights copied + tyre_life init
+  W_pit[128] = -10.0, b_pit = +7.0 (state-conditional from step 1)
+  Environment: make_env_pit_d30 (voluntary_pit_reward=True, no forced pit)
+  LR: cosine(1e-4 → 1e-6), set at PPO construction
+  Time: 470 seconds (faster than d30/d31 due to shorter episodes early on)
+
+Training trajectory (selected ep_rew_mean by iteration):
+  Iter   1: ep_rew= -143, ep_len=  504  ← pitting too often (tl > 0.60 → -200)
+  Iter   2: ep_rew= -179, ep_len=  368
+  Iter  10: ep_rew= -320, ep_len=1060   ← value function recalibrating; ep_len growing
+  Iter  20: ep_rew= -273, ep_len=1300   ← agent learns to delay pits (longer episodes)
+  Iter  35: ep_rew=  +4,  ep_len=1340   ← TURNED POSITIVE!
+  Iter  50: ep_rew= +197, ep_len=1350
+  Iter 100: [continuing positive growth]
+  Iter 500: [ep_rew ≈ 800–900]
+  Iter 977: ep_rew= +976, ep_len= 832   ← final (LR=1e-6)
+
+Post-training pit weights:
+  action_net.weight[2, :128] abs_mean: 0.123 → 0.200 (+63%, features adapted)
+  action_net.weight[2,  128]:         -10.0000 → -10.4882 (barely moved, -5%)
+  action_net.bias[2]:                  +7.0000 → +6.4997 (threshold tuned slightly)
+  log_std[2]:                          0.7578 → -0.1462  (std 2.13 → 0.86 — more certain!)
+  Features drift: 0.00e+00 (perfect freeze)
+  Throttle/steer drift: 0.00e+00 (perfect freeze)
+
+Post-training pit probabilities:
+  tl=0.30: pit_direct=+3.35  P(pit>0) ≈ 100%  [pit]
+  tl=0.45: pit_direct=+1.78  P(pit>0) ≈  98%  [pit]
+  tl=0.60: pit_direct=+0.21  P(pit>0) ≈  59%  [pit/hold boundary]
+  tl=0.69: pit_direct=-0.74  P(pit>0) ≈  20%  [hold]
+  tl=0.80: pit_direct=-1.89  P(pit>0) ≈   1%  [hold]
+  tl=0.90: pit_direct=-2.94  P(pit>0) ≈   0%  [hold]
+
+==============================================================================
+RESULTS
+==============================================================================
+
+FIXED START (N=10, deterministic):
+  D32: reward=2683.83, laps=11, steps=2000, pits=1.0, completion=100% ← BREAKTHROUGH!
+  D29: reward=1885.32, laps=7, steps=1353 (best prior result)
+  D21: reward=1877.33, laps=7, steps=1359 (baseline)
+  → D32 BREAKS THE 1883 CEILING that held for d21-d31 (11 experiments)!
+  → +798 reward improvement (+42%)
+  → 100% lap completion (vs 0% for all d21-d31)
+  → 11 laps completed (vs 7 for all d21-d31)
+  → 1 pit stop (exactly at the right time, voluntarily)
+  → SURVIVED TO STEP 2000 (vs crash at step ~1354 for d21-d31)
+
+RANDOM START (N=20):
+  D32: reward=1296.08 ± 1180.08, laps=6.35, steps=1182, pits=1.15, completion=45%
+  D28: reward=1012.07 (previous best pit policy random)
+  D31: reward=940.50  (previous best of d26-d31)
+  D23: reward=1117.28 (best non-d32 pit random)
+  → D32 is the BEST random-start pit policy by a wide margin (+284 vs d28)
+  → 45% lap completion (vs 0% for ALL d21-d31!)
+  → 6.35 avg laps (more than expert at 3.85, PPO curriculum v2 at 5.95)
+  → First pit policy to consistently complete full 2000-step episodes
+
+==============================================================================
+WHY D32 SUCCEEDED WHERE D26–D31 FAILED
+==============================================================================
+
+THE KEY INSIGHT:
+  D26–D31 all tried to teach the LINEAR pit row (action_net[2,:]) to be
+  state-conditional using the FROZEN 128-dim mlp_extractor features. But:
+  1. The frozen features don't linearly encode tyre_life (3.25% separation)
+  2. BC pre-training (d31) cannot fix the feature bottleneck
+  3. Any PPO training with forced/voluntary pits creates a gradient that pushes
+     pit_bias negative because fresh-tyre pits (probabilistic at 50%) dominate
+
+  D32 bypasses the bottleneck ENTIRELY by appending tyre_life (obs[11]) directly
+  to the 128-dim feature vector before the action_net. The action_net sees:
+    latent_pi = [features (128-dim) | tyre_life (1-dim)]  =  129-dim
+  The pit row's 129th weight provides a DIRECT linear path from tyre_life to
+  pit_signal, independent of what the frozen features encode.
+
+WHY THE GRADIENT NOW WORKS:
+  - At worn states (tl < 0.60, voluntary bonus fires):
+      pit_signal = -10.49×tl + 6.50 + features_noise ≈ +1.5 to +4
+      P(pit>0) ≈ 95–100% → voluntary pit fires → +300 bonus → net +100
+      POSITIVE advantage → gradient reinforces current pit policy ✓
+
+  - At fresh states (tl > 0.70):
+      pit_signal = -10.49×tl + 6.50 ≈ -0.8 to -3
+      P(pit>0) ≈ 0–20% → rarely pits → no -200 penalty
+      NEUTRAL gradient → doesn't damage the state-conditioning ✓
+
+  Net gradient: strongly positive from frequent correct pits, minimal negative
+  from rare incorrect pits. First time the gradient pointed the right direction
+  consistently throughout training.
+
+==============================================================================
+WHAT'S NEXT (d33)
+==============================================================================
+
+D32 achieved 2683.83 fixed-start, 1296 random-start, 11 laps, 100% completion
+with a single voluntary pit. This is a MAJOR SUCCESS — the first pit policy to
+beat the 1883 ceiling.
+
+NEXT TARGETS:
+  1. Can we reach d22's 2283 reward level but WITH pitting? (d22 got 2283 without pits)
+     D32 got 2683 WITH pitting — already better than d22!
+     Target for d33: reward > 3000 (equivalent to surviving a full race with optimal pit)
+
+  2. Optimize pit timing: current threshold is ~0.60-0.69. Can PPO find the
+     exact optimal threshold by training longer or with a better reward structure?
+
+  3. Multiple pit stops: can the agent learn a 2-pit strategy?
+     With tyre_life cycling: pit at tl=0.60 → fresh → tl drops to 0.60 again at step ~1140
+     → second pit → fresh → survive to 2000 → potentially 14+ laps
+
+  4. Can we train for 4M steps instead of 2M to let the threshold optimize further?
+     The std collapsed (2.13→0.86) which is good for execution but might limit threshold tuning.
+
+ARCHITECTURE NOTE FOR FUTURE WORK:
+  PitAwarePolicy (rl/pit_aware_policy.py) is now the recommended base for all
+  pit strategy experiments. The key components:
+    - TyrLifeAugmentedExtractor: appends obs[TYRE_LIFE_OBS_IDX] to actor latent
+    - PitAwarePolicy: uses TyrLifeAugmentedExtractor via _build_mlp_extractor()
+    - copy_d21_weights_into_pit_aware(): weight transfer utility
+  SB3 save/load works transparently as long as pit_aware_policy.py is importable.

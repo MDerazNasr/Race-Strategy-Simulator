@@ -120,6 +120,7 @@ from env.f1_env import F1Env
 from expert.expert_driver import ExpertDriver
 from bc.train_bc import BCPolicy
 from stable_baselines3 import PPO
+from rl.pit_aware_policy import PitAwarePolicy  # noqa: F401 — needed for PPO.load of d32
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -812,6 +813,22 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             ),
             "optional":      True,
             "optional_file": "ppo_pit_v4_d31.zip",
+            "env_key":       "pit",
+        },
+        {
+            "name":  "PPO Pit v4 D32 (d32)",
+            "color": "#1B5E20",
+            # D32: PitAwarePolicy — direct tyre_life → pit_signal connection (129-dim action_net).
+            # Bypasses the feature bottleneck that defeated d26–d31.
+            # W_pit[128]=-10.0, b_pit=+7.0 → state-conditional from episode 1.
+            # voluntary_pit_reward=True — correct gradient direction.
+            # NOTE: PPO.load works because PitAwarePolicy is imported above (pickle needs it).
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4_d32.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4_d32.zip",
             "env_key":       "pit",
         },
     ]
