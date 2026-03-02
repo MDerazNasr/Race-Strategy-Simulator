@@ -721,6 +721,154 @@ STAGES_PIT_V5: List[CurriculumStage] = [
 
 
 # =============================================================================
+# PIT STRATEGY V6 CURRICULUM  (d29)
+# =============================================================================
+#
+# PROBLEM (d26–d28 diagnostic — fixed-start ceiling at 1883):
+#   D29 diagnostic revealed the root cause of the 1883 fixed-start ceiling:
+#
+#   1. D28 NEVER pits voluntarily on fixed-start (pit_signal = -1.0 throughout).
+#      The 1883 reward comes from 7 laps with NO pit at all.
+#
+#   2. The fixed-start episode crashes at step 1354 (tyre_life ≈ 0.35).
+#      This crash IS tyre-induced: obs[11]=tyre_life affects throttle/steer
+#      behavior at the critical corner. With fresh tyres (obs[11]=1.0 after pit),
+#      the same policy successfully navigates past that corner.
+#
+#   3. Counterfactual simulation confirmed:
+#      - No pit:                  reward=1883, 7 laps, crashes at step 1354
+#      - Forced pit (tl<0.40):   reward=2697, 11 laps, survives to step 2000!
+#      - Forced pit (tl<0.50):   reward=2701, 11 laps, survives to step 2000!
+#      A single well-timed pit unlocks 800+ more reward.
+#
+#   4. STAGES_PIT_V5 thresholds (0.25/0.15/0.08) are ALL below the crash
+#      tyre_life (0.35). On the fixed-start trajectory, forced pits NEVER fire
+#      because the episode crashes at tyre_life=0.35 BEFORE reaching 0.25.
+#      → D26/D27/D28 received NO forced pit training signal on fixed-start.
+#      → Only random-start episodes provided pit experiences (insufficient).
+#
+#   5. The pit_timing_reward in d27/d28 pushed bias MORE negative (-0.929)
+#      because tyre_life < 0.30 is unreachable on the fixed-start trajectory
+#      (episode ends at step 1354, tyre_life never reaches 0.30 without a prior pit).
+#
+# THE D29 FIX — HIGHER SAFETY NET THRESHOLDS:
+#   STAGES_PIT_V6 uses thresholds that fire BEFORE the fixed-start crash:
+#     Stage 0 (threshold=0.50): fires at step ~1145 (tyre_life crosses 0.50)
+#     Stage 1 (threshold=0.45): fires at step ~1259 (tyre_life crosses 0.45)
+#     Stage 2 (threshold=0.38): fires at step ~1322 (tyre_life crosses 0.38)
+#   All three fire BEFORE the crash at step 1354 (tyre_life=0.35).
+#   → After forced pit, agent survives to step 2000 → huge positive return.
+#   → Training signal: "pitting at tyre_life ≈ 0.45–0.50 is extremely beneficial."
+#
+# WHY LOAD D21 (not d26/d27/d28)?
+#   D21 demonstrated VOLUNTARY pitting on fixed-start (pit_count=1, step 929).
+#   D21 pit row bias ≈ +0.006 (near-zero — easiest to push positive).
+#   D26/D27/D28 pit bias: -0.817/−0.839/−0.929 (wrong direction, harder to fix).
+#   The three-layer freeze preserves driving quality exactly (d21 driving ≡ d26/d27/d28).
+#
+# COMBINED WITH: standard env (make_env_pit, no pit_timing_reward)
+#   The pit_timing_reward in d27/d28 rewarded tyre_life < 0.30 (unreachable).
+#   Standard env: -200 pit penalty only. No misaligned gradient.
+#   The value function will learn that pitting at tyre_life ≈ 0.45 gives +800 return.
+#
+# STAGE SCHEDULE (2M total steps from d21's ~1M checkpoint):
+#   Stage 0: ~500k steps  (245 rollouts × 2048)  threshold=0.50 (fires before crash)
+#   Stage 1: ~1M steps    (488 rollouts × 2048)  threshold=0.45 (fires before crash)
+#   Stage 2: ~500k steps  (never graduates)       threshold=0.38 (fires before crash)
+#
+# EXPECTED OUTCOME:
+#   - Voluntary pit on fixed-start: YES (policy learns to pit at tyre_life ≈ 0.45)
+#   - Fixed-start reward: > 2000 (current 1883 → potential 2697 if pit fired)
+#   - Random-start pitting: maintained or improved (threshold fires in all long episodes)
+#   - Driving: IDENTICAL to d21/d26/d27/d28 (three-layer freeze)
+#
+STAGES_PIT_V6: List[CurriculumStage] = [
+
+    # -- Stage 0: Threshold=0.50 (~500k steps) --------------------------------
+    # Goal: provide forced pit experiences BEFORE the fixed-start crash.
+    #
+    # WHY threshold=0.50:
+    #   tyre_life reaches 0.50 at step ~1145 on fixed-start.
+    #   The crash happens at step 1354 (tyre_life=0.35).
+    #   Forced pit at tyre_life<0.50 fires at step ~1145, BEFORE the crash.
+    #   After pit, agent survives to step 2000 → 11 laps (vs 7 without pit).
+    #   Advantage of pitting: 2701 - 1883 = 818. Enormous positive signal!
+    #   Value function: Q(s_tyre050, pit) >> Q(s_tyre050, no-pit).
+    #   Policy: stochastic exploration at tyre_life ≈ 0.50 with positive advantage
+    #   → pit row pushed toward positive values for tyre_life ≈ 0.45–0.55 states.
+    #
+    # Graduation: grad_lap_rate=0.0 → graduate after filling the window.
+    # grad_window=245 → 245 × 2048 ≈ 500k steps.
+    CurriculumStage(
+        name                 = "Stage 0 -- Safety Net 0.50 (~500k steps)",
+        max_accel            = 15.0,
+        forced_pit_threshold = 0.50,   # fires at tyre_life<0.50 (~step 1145 on fixed-start)
+        forced_pit_interval  = 0,
+        reward_kwargs        = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.1,
+            lateral_weight    = 0.5,
+            heading_weight    = 0.1,
+            smoothness_weight = 0.05,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 0.0,   # graduate after filling the window
+        grad_window   = 245,   # 245 × 2048 ≈ 500k steps
+    ),
+
+    # -- Stage 1: Threshold=0.45 (~1M steps) ----------------------------------
+    # Goal: agent must pit voluntarily for tyre_life in [0.45, 0.50]; env is backup.
+    # Agent should have learned from Stage 0 that pitting near 0.50 is beneficial.
+    # Now the threshold drops to 0.45 — the agent must self-pit 0.45–0.50 zone.
+    # Forced pit at 0.45 still fires before the crash at step 1354 (tyre_life=0.35).
+    # Fires at step ~1259 on fixed-start.
+    #
+    # The gap 0.45–0.50 (about 114 steps) requires the agent to cover on its own.
+    # Value function from Stage 0 guides the pit row toward positive values here.
+    CurriculumStage(
+        name                 = "Stage 1 -- Safety Net 0.45 (~1M steps)",
+        max_accel            = 15.0,
+        forced_pit_threshold = 0.45,   # backup: fires before crash on fixed-start
+        forced_pit_interval  = 0,
+        reward_kwargs        = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.1,
+            lateral_weight    = 0.5,
+            heading_weight    = 0.1,
+            smoothness_weight = 0.05,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 0.0,   # graduate after filling the window
+        grad_window   = 488,   # 488 × 2048 ≈ 1M steps
+    ),
+
+    # -- Stage 2: Threshold=0.38 (never graduates, ~500k steps) --------------
+    # Final stage. Agent must self-pit for tyre_life in [0.38, 0.45]; env backup.
+    # Threshold=0.38 fires at step ~1322 on fixed-start — still BEFORE the crash
+    # at step 1354. This keeps the safety net active while demanding more autonomy.
+    #
+    # By Stage 2, the agent should pit voluntarily at tyre_life ≈ 0.40–0.50
+    # (learned from Stage 0/1 gradient). The threshold=0.38 is a late backup.
+    CurriculumStage(
+        name                 = "Stage 2 -- Safety Net 0.38 (~500k steps, final)",
+        max_accel            = 15.0,
+        forced_pit_threshold = 0.38,   # late backup: fires at ~step 1322 on fixed-start
+        forced_pit_interval  = 0,
+        reward_kwargs        = dict(
+            progress_weight   = 1.0,
+            speed_weight      = 0.1,
+            lateral_weight    = 0.5,
+            heading_weight    = 0.1,
+            smoothness_weight = 0.05,
+            terminal_penalty  = 20.0,
+        ),
+        grad_lap_rate = 1.1,   # never graduates — runs until total_timesteps
+        grad_window   = 9999,
+    ),
+]
+
+
+# =============================================================================
 # CURRICULUM CALLBACK
 # =============================================================================
 
