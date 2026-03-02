@@ -1144,3 +1144,69 @@ WHAT'S NEXT (d30): Fix the gradient direction — redesign the training signal f
     This directly trains: "choosing pit at worn tyre → high reward."
   Option A: BC pre-train pit row to output +2.0 at tyre_life < 0.55, -2.0 at > 0.70.
             Then PPO fine-tuning — guarantees gradient goes right direction.
+
+==============================================================================
+WEEK 5 / d30 — Pit v4 D30: Voluntary Pit Reward — Early Over-Exploration
+==============================================================================
+
+Fix attempted: voluntary_pit_reward=True in F1Env.
+  +300 bonus when agent's OWN pit_signal > 0 fires AND tyre_life < 0.60.
+  Net voluntary pit cost: -200 + 300 = +100 (immediately profitable).
+  Removed forced pit entirely. LR bug fixed: set BOTH model.learning_rate AND model.lr_schedule.
+  Load d21 (bias=+0.006). Three-layer freeze. 2M steps, 977 iterations, 872 seconds.
+
+Results (fixed start, N=10):
+  d30: reward=1879.85, laps=7, steps=1357 — at baseline level
+  d29: reward=1885.32 (slightly better)
+  d21: reward=1877.33 (baseline — barely worse)
+
+Results (random start, N=20):
+  d30: reward=660.35 ± 823.99, laps=3.15, steps=613, pits=0.50 avg
+  d28: reward=762.03 (better)
+  d21: reward=798.42 (better)
+  → D30 worse than d21 and d28 on random start.
+
+Post-training pit stats:
+  Pit bias:   +0.0060 → -0.7281 (NEGATIVE — wrong direction)
+  log_std[2]: 0.7578 → 0.3819 (exploration collapsed: std 2.13 → 1.46)
+  Features drift: 0.00e+00 (perfect freeze)
+
+ROOT CAUSE — EARLY OVER-EXPLORATION PROBLEM:
+  D30 starts from d21 (pit_std=2.13) → P(pit_signal>0) ≈ 50% per step.
+  Agent pits mostly on fresh tyres → -200 each → negative gradient dominates.
+
+==============================================================================
+WEEK 5 / d31 — Pit v4 D31: BC Pre-training — Feature Bottleneck Discovered
+==============================================================================
+
+Fix attempted: BC pre-training of action_net.weight[2,:] + bias[2] using frozen features.
+  Collected 100 episodes of d21 driving (no pitting) → 33,467 (obs, tyre_life) pairs.
+  6,429 worn (tl < 0.55) → target +2.0; 21,307 fresh (tl > 0.65) → target -2.0.
+  500 Adam epochs (LR=1e-3) on pit row only. Then three-layer freeze + PPO (2M steps).
+
+BC training result (FAILED):
+  Final BC loss: 2.5493 (should be near 0 for perfect ±2.0 separation)
+  Worn state pit_signal mean:  -0.222 (target: +2.0 — WRONG SIGN!)
+  Fresh state pit_signal mean: -0.090 (target: -2.0 — wrong magnitude)
+  Linear separation achieved: 0.13 (vs target 4.0 = 3.25% of target)
+
+Results (fixed start, N=10):
+  d31: reward=1879.85, laps=7, steps=1357 — identical to d30, no improvement
+
+Results (random start, N=20):
+  d31: reward=804.92 ± 893.90, laps=3.40 — BEST of d26-d31 series
+
+Post-training pit stats:
+  Pit bias: d21=+0.006 → after BC=-0.231 → d31 final=-0.894 (PPO pushed negative)
+  log_std[2]: 0.758 → 0.273 (collapsed: std 2.13 → 1.31)
+
+ROOT CAUSE — FEATURE BOTTLENECK:
+  The frozen mlp_extractor features don't encode tyre_life in a direction that allows
+  a single linear pit row to separate worn vs fresh states.
+  D21's pitting success was likely random exploration (50% pit rate) at the right time,
+  not state-conditional learned pitting.
+
+WHAT'S NEXT (d32): Architectural fix — direct tyre_life → pit_signal connection.
+  Custom feature extractor appending tyre_life to 128-dim features (129-dim total).
+  Initialize pit_weight[128] = -10.0 (direct tyre_life→pit connection).
+  Keeps d21 driving intact; gives pit row direct access to tyre_life for state-conditioning.

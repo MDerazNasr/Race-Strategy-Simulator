@@ -1,0 +1,180 @@
+==============================================================================
+WEEK 5 / d31 — Pit v4 D31: BC Pre-training of Pit Row — Feature Bottleneck
+==============================================================================
+
+DATE: 2026-03-02
+STATUS: COMPLETE (2M steps, 861 seconds)
+
+==============================================================================
+WHAT WAS BUILT
+==============================================================================
+
+D31 attempted to fix the early over-exploration problem discovered in d30:
+  Root cause (d30): voluntary_pit_reward provides correct gradient in principle,
+  but with pit_std=2.13 and near-zero bias, 50% of pits happen on fresh tyres
+  → -200 penalties dominate before +300 bonus zone is reached consistently.
+
+D31 FIX: BC pre-training of pit row BEFORE PPO:
+  1. Load d21 (pit_bias=+0.006, frozen features encode d21's driving)
+  2. Collect 100 episodes of d21 driving (pit_signal forced to -1.0, no pitting)
+     → 33,467 (observation, tyre_life) pairs
+  3. Extract frozen mlp_extractor features for all states
+  4. Create supervised targets:
+       worn  (tl < 0.55): target = +2.0  (6,429 samples)
+       fresh (tl > 0.65): target = -2.0  (21,307 samples)
+       neutral (0.55-0.65): excluded    (5,731 samples)
+  5. Train ONLY action_net.weight[2,:] + bias[2] via MSE (500 Adam epochs, LR=1e-3)
+  6. After BC: apply three-layer freeze + PPO with voluntary_pit_reward=True
+
+MOTIVATION: After BC, pit_signal should be +2.0 at worn states and -2.0 at fresh states.
+  With std=2.13 and mean=+2.0: P(pit>0 | worn) ≈ 82% → frequent voluntary pits at worn tyre
+  → +300 bonus fires → POSITIVE gradient → reinforces correct direction from episode 1.
+
+==============================================================================
+BC TRAINING RESULTS
+==============================================================================
+
+BC convergence:
+  Epoch  100: loss=2.7791, pit_bias=-0.0804
+  Epoch  200: loss=2.6755, pit_bias=-0.1295
+  Epoch  300: loss=2.6274, pit_bias=-0.1639
+  Epoch  400: loss=2.5869, pit_bias=-0.1974
+  Epoch  500: loss=2.5493, pit_bias=-0.2310
+
+BC sanity check:
+  Worn states (tl < 0.55): pit_signal mean = -0.222  (target = +2.0) ← WRONG SIGN!
+  Fresh states (tl > 0.65): pit_signal mean = -0.090  (target = -2.0) ← WRONG MAGNITUDE!
+  Linear separation achieved: 0.13  (vs target separation 4.0 = 3.25% of target)
+
+CONCLUSION: BC FAILED. The linear pit row cannot achieve the ±2.0 targets because the
+frozen mlp_extractor features do not distinguish worn from fresh tyre states well enough
+for a linear classifier.
+
+==============================================================================
+TRAINING LOG
+==============================================================================
+
+Setup:
+  Start checkpoint: ppo_pit_v4.zip (d21, pit_bias=+0.006)
+  BC: 500 epochs, LR=1e-3, targets ±2.0
+  Pit bias after BC: -0.2310 (failed to reach positive)
+  log_std[2]: unchanged at 0.7578 (BC doesn't touch log_std, no reset needed)
+  Environment: make_env_pit_d30 (voluntary_pit_reward=True, no forced pit)
+  Three-layer freeze: 18,176 params frozen in features
+  LR: cosine(1e-4→1e-6), BOTH model.learning_rate AND model.lr_schedule set
+
+Trajectory (ep_rew_mean every 100 iterations):
+  Iter   1: ep_rew=-183, ep_len=52    ← BC pit row confuses agent, many crashes
+  Iter   2: ep_rew=-353, ep_len=442
+  Iter 100: [recovering toward positive]
+  Iter 975: ep_rew=+662, ep_len=851
+  Iter 977: ep_rew=+657, ep_len=859  ← final (LR=1e-6)
+
+  Better trajectory than d30 (d30 ended at +542), but started much worse (-183 vs -1340 for d30).
+
+Post-training pit stats:
+  Pit weight: 0.1225 → 0.2945  (+140%)
+  Pit bias:   d21=+0.0060 → BC=-0.2310 → d31=-0.8935 (NEGATIVE — moved away from target)
+  log_std[2]: 0.7578 → 0.2731  (collapsed: std 2.13 → 1.31 — exploration died)
+  approx_kl:  1e-9 to 1e-10  (policy frozen in space — tiny updates that accumulated)
+  policy_gradient_loss: 1e-6 to 1e-8 (essentially zero — PPO updates minimal)
+  Features drift: 0.00e+00 (perfect freeze)
+  LR confirmed: started at 1e-4
+
+==============================================================================
+RESULTS
+==============================================================================
+
+FIXED START (N=10, deterministic):
+  D31: reward=1879.85, laps=7, steps=1357  (identical to d30)
+  D30: reward=1879.85, laps=7, steps=1357  (same)
+  D29: reward=1885.32, laps=7, steps=1353  (better)
+  D21: reward=1877.33, laps=7, steps=1359  (baseline)
+  → No improvement over d30. BC pre-training had ZERO effect on fixed-start behavior.
+
+RANDOM START (N=20):
+  D31: reward=804.92 ± 893.90, laps=3.40, steps=684, pits=?
+  D28: reward=762.03 (d31 better)
+  D21: reward=798.42 (d31 slightly better)
+  D26: reward=466.11 (much worse)
+  → D31 is the BEST random-start result of the d26-d31 series!
+     However, this likely reflects the pit row's near-zero effect (agent similar to d21 random behavior)
+     rather than learned state-conditional pitting.
+
+==============================================================================
+ROOT CAUSE ANALYSIS
+==============================================================================
+
+THE FEATURE BOTTLENECK — WHY BC FAILED:
+
+The mlp_extractor.policy_net was trained (during d21 BC init + PPO) to optimize
+throttle and steer actions, NOT pit timing. Although tyre_life IS in obs[11],
+the features projected onto the pit row direction provide minimal tyre_life information.
+
+Evidence:
+  - Worn states (tl < 0.55): feature projection → pit_signal mean = -0.222
+  - Fresh states (tl > 0.65): feature projection → pit_signal mean = -0.090
+  - Difference: 0.13 (vs target 4.0 → only 3.25% of required separation)
+  - Both worn and fresh states produce NEARLY IDENTICAL pit_signals
+  - The linear classifier cannot achieve ±2.0 targets with these indistinguishable features
+
+WHY THE SEPARATION IS SO LOW:
+  The mlp_extractor was trained with BC + PPO to minimize driving error and maximize
+  lap rewards. tyre_life affects driving indirectly (lower tyre_life → less grip →
+  harder corners), but the features are optimized for driving, not tyre_life prediction.
+  The features suppress irrelevant information (for driving), which happens to include
+  the specific linear direction that would help pit timing.
+
+D21's PITTING WAS RANDOM, NOT STATE-CONDITIONAL:
+  D21 appeared to "learn" to pit because:
+  - BC init gave pit_bias ≈ +0.006, pit_std = 2.13 → P(pit>0) ≈ 50%
+  - Agent pits randomly every 100-200 steps (cooldown period)
+  - First pit attempt happened at step ~929 (tyre_life ≈ 0.45-0.55, worn)
+  - This was LUCK: the 50% random pit rate happened to fire during worn-tyre phase
+  - BC output on d21's features: worn mean = -0.222, fresh mean = -0.090 (nearly same!)
+  - d21 is NOT state-conditional — it just has high enough pit_std that random pits occur
+
+IMPLICATIONS:
+  The three-layer freeze approach (d26-d31) cannot create state-conditional pitting
+  because the frozen features don't encode tyre_life in a linearly separable form
+  for the pit row. No amount of pit row fine-tuning can fix this bottleneck.
+
+  The voluntary_pit_reward (d30-d31) provides the correct gradient IN PRINCIPLE,
+  but the BC pre-trained pit row (d31) can't achieve the state-conditional initialization
+  needed. The PPO then reverts to the same failure mode: negative bias, no pitting.
+
+==============================================================================
+WHAT'S NEXT (d32): ARCHITECTURAL FIX — DIRECT TYRE_LIFE CONNECTION
+==============================================================================
+
+The fundamental problem: linear pit row + frozen features = insufficient linear capacity.
+
+FIX: Add a direct tyre_life → pit_signal connection, bypassing the feature bottleneck.
+
+APPROACH A (Custom Feature Extractor — RECOMMENDED):
+  1. Create TyrLifeAugmentedExtractor:
+       features = mlp_extractor.policy_net(obs)  # [128]
+       tyre_life = obs[:, 11:12]                  # [1]
+       augmented = concat(features, tyre_life)    # [129]
+  2. New action_net: Linear(129 → 3)
+  3. Copy d21 weights into cols 0-127 (throttle/steer/pit row)
+  4. Initialize pit row col 128 (tyre_life direct): weight = -10.0
+       → pit_signal = W[2,:128] @ features + (-10.0) * tyre_life + b
+       → At tl=0.45: pit_signal ≈ -10×0.45 + b → positive if b > 4.5
+       → At tl=0.90: pit_signal ≈ -10×0.90 + b → negative if b < 9.0
+     Set b = 7.0: { tl=0.45 → +2.5, tl=0.70 → 0, tl=0.90 → -2.0 }  ✓ state-conditional!
+  5. Initialize throttle/steer row col 128 = 0.0 (no tyre_life effect on driving)
+  6. Apply three-layer freeze (freeze cols 0-127 of throttle/steer rows)
+  7. PPO with voluntary_pit_reward=True, train pit row + col 128 of all rows
+
+APPROACH B (Rule-based diagnostic — quick win):
+  Hybrid: d21 throttle/steer + rule-based pit trigger (tyre_life < 0.50 → pit).
+  Shows reward > 2000 IS achievable. Confirms the driving/pit separation is viable.
+  Does NOT require RL training — but sets the target for the RL approach.
+
+Key advantage of Approach A:
+  The direct tyre_life weight bypasses the frozen feature bottleneck completely.
+  BC on just the tyre_life coefficient: w_tyre = arg min MSE(w×tl + const, ±2.0)
+  This is a 1D regression: trivially solvable! The BC will converge to perfect targets.
+  After BC: pit_signal is state-conditional by construction.
+  Then PPO fine-tunes the exact threshold and timing with voluntary_pit_reward=True.

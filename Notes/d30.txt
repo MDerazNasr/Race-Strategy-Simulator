@@ -1,0 +1,137 @@
+==============================================================================
+WEEK 5 / d30 — Pit v4 D30: Voluntary Pit Reward — Gradient Still Wrong Direction
+==============================================================================
+
+DATE: 2026-03-02
+STATUS: COMPLETE (2M steps, 872 seconds)
+
+==============================================================================
+WHAT WAS BUILT
+==============================================================================
+
+D30 attempted to fix the forced-pit gradient flaw discovered in d29:
+  Root cause (d26-d29): forced_pit fires regardless of agent's pit_signal.
+  PPO credits positive advantage to the chosen action (pit_signal < 0).
+  Bias spiraled: d21=+0.006 → d29=-1.217 (consistently wrong direction).
+
+D30 FIX: voluntary_pit_reward=True in F1Env:
+  - When agent's OWN pit_signal > 0 fires AND tyre_life < 0.60:
+    VOLUNTARY_PIT_BONUS = +300 → net cost = -200 + 300 = +100 (profitable!)
+  - No forced pit — agent must discover pitting via natural exploration
+  - LR bug fixed: model.lr_schedule = cosine(1e-4→1e-6) set alongside
+    model.learning_rate (SB3 uses lr_schedule for optimizer updates)
+  - Three-layer freeze identical to d26-d30
+  - Load d21 (bias=+0.006, near-zero)
+
+VERIFICATION:
+  Voluntary pit at tyre_life=0.45: pit_net=+100 ✓ (-200+300)
+  Voluntary pit at tyre_life=0.80: pit_net=-200 ✓ (no bonus, correct)
+  LR confirmed: lr_schedule(1.0) = 1e-4 ✓ (fixed from d29's 3e-4 bug)
+
+==============================================================================
+TRAINING LOG
+==============================================================================
+
+Setup:
+  Start checkpoint: ppo_pit_v4.zip (d21, pit_bias=+0.006)
+  Environment: make_env_pit_d30 (voluntary_pit_reward=True, no forced pit)
+  Three-layer freeze: 18,176 params frozen in features
+
+Trajectory (ep_rew_mean every 100 iterations):
+  Iter   0: ep_rew=-1340, ep_len=2000   ← massive pitting at start (pit_std=2.1 → 50% rate)
+  Iter 100: ep_rew= -896, ep_len=1440   ← value function beginning to calibrate
+  Iter 200: ep_rew= -748, ep_len=1310
+  Iter 300: ep_rew= +209, ep_len=1220   ← turned positive! agent pitting less aggressively
+  Iter 400: ep_rew= +507, ep_len= 620   ← episodes much shorter (agent settling)
+  Iter 500: ep_rew= +622, ep_len= 765
+  Iter 700: ep_rew= +767, ep_len= 924
+  Iter 900: ep_rew= +578, ep_len= 849
+  Iter 977: ep_rew= +542, ep_len= 696   ← final (LR=1e-6)
+
+Post-training pit stats:
+  Pit weight: 0.1225 → 0.2668  (+118% — weights changing significantly)
+  Pit bias:   +0.0060 → -0.7281 (NEGATIVE — less bad than d29's -1.217 but still wrong)
+  log_std[2]: 0.7578 → 0.3819  (std dropped: 2.13 → 1.46 — exploration collapsed)
+  Features drift: 0.00e+00 (perfect freeze)
+  LR confirmed: started at 1e-4 (BUG FIXED from d29)
+
+==============================================================================
+RESULTS
+==============================================================================
+
+FIXED START (N=10, deterministic):
+  D30: reward=1879.85, laps=7, steps=1357
+  D29: reward=1885.32, laps=7, steps=1353 (better)
+  D28: reward=1883.41, laps=7, steps=1354 (better)
+  D21: reward=1877.33, laps=7, steps=1359 (starting point — barely worse)
+  → D30 is essentially at baseline. No improvement over d21.
+
+RANDOM START (N=20):
+  D30: reward=432.49 ± 974.72, laps=2.50, steps=556, pits=0.85 avg
+  D29: reward=532.59 (better)
+  D28: reward=464.61 (better)
+  D26: reward=979.42 (best pit policy)
+  → D30 is the WORST of the d26-d30 series on random start.
+
+==============================================================================
+ROOT CAUSE ANALYSIS
+==============================================================================
+
+THE EARLY OVER-EXPLORATION PROBLEM:
+  D30 started from d21 (pit_bias=+0.006, pit_std=2.13).
+  P(pit_signal > 0) ≈ 50% per non-cooldown step.
+  Early training: agent pits every ~100-200 steps (cooldown period),
+  mostly on fresh tyres (tyre_life > 0.60) → -200 penalty, NO bonus.
+
+  For the voluntary_pit_bonus (+300) to override the -200 penalty signal,
+  the agent needs 2/3 of its pits to be at tyre_life < 0.60.
+  But early in training, most pits are at tyre_life > 0.60 because:
+  1. Random starts can start at ANY tyre_life (including fresh)
+  2. Agent pits aggressively due to high std → resets tyre_life to 1.0
+     → never reaches tyre_life < 0.60 before pitting again
+
+  Result: net gradient is strongly negative for pit_signal throughout.
+  Bias: +0.006 → -0.728 (less negative than d29's -1.217 due to some
+  occasional worn-tyre pits getting the +300 bonus, but still negative).
+
+EVIDENCE FROM TRAJECTORY:
+  ep_rew went from -1340 (heavy pitting everywhere) to +540 (fewer pits).
+  The agent learned "pitting too often is bad" but couldn't learn
+  "pitting at worn tyres is good" because the pit bias is now too negative.
+  With bias=-0.728 and std=1.46: P(pit_signal>0 at worn tyre) ≈ 31%.
+  → Agent sometimes pits at worn tyres but not reliably.
+
+==============================================================================
+WHAT'S NEXT (d31): BC PRE-TRAINING OF PIT ROW
+==============================================================================
+
+The fundamental problem: with near-zero bias and high pit_std, the agent
+explores pitting uniformly across all tyre_life states early in training.
+The negative signal from fresh-tyre pits dominates → bias goes negative.
+
+FIX: Initialize the pit row with BC to be STATE-CONDITIONAL before PPO:
+  - Collect 50 episodes of d21 driving (no pitting) to sample feature states
+  - Create target: pit_signal = +2.0 when tyre_life < 0.55 (pit!)
+                   pit_signal = -2.0 when tyre_life > 0.65 (don't pit!)
+  - Run gradient descent on ONLY action_net.weight[2,:] and bias[2]
+    (frozen features × trainable pit row = state-conditional linear classifier)
+  - After BC: pit_signal > 0 at worn states, < 0 at fresh states GUARANTEED
+
+Then PPO fine-tuning with voluntary_pit_reward=True:
+  - Agent enters training with correct state-conditional pit policy
+  - At worn-tyre states: pit_signal ≈ +2.0 → pit fires → +300 bonus
+    → Positive advantage → gradient REINFORCES high pit_signal at worn states
+  - At fresh-tyre states: pit_signal ≈ -2.0 → pit doesn't fire
+    → No penalty → neutral gradient
+  - No spurious fresh-tyre gradient to overcome!
+
+This is the most principled fix. The BC targets (±2.0) are chosen because:
+  - With std=2.13: P(pit_signal > 0 | mean=+2.0) ≈ 82% (usually pits)
+  - P(pit_signal > 0 | mean=-2.0) ≈ 18% (rarely pits)
+  After PPO: std will adjust and mean will move toward optimal timing.
+
+ADDITIONAL FIXES:
+  - Log_std[2] should also be re-initialized to 0.76 (d21's value)
+    after BC, to restore exploration before PPO fine-tuning.
+  - Verify BC is converging: check loss over 500 epochs, verify
+    pit_signal ≈ +2.0 on a worn-tyre state and ≈ -2.0 on fresh.
