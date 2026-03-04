@@ -1304,3 +1304,41 @@ WHY FIXED=1 PIT but RANDOM=1.85 PITS:
   still has features that just barely tip pit_signal negative. Random-start sees diverse
   car states at the second-pit window — in most, the direct component (+1.48 at tl=0.53)
   overcomes the features noise → second pit fires → 85% completion, 9.25 laps.
+
+──────────────────────────────────────────────────────────────────────────────
+WEEK 5/6 / D35 — Pit v4 D35: Seal the Second Pit — PARTIAL PROGRESS
+──────────────────────────────────────────────────────────────────────────────
+DATE: 2026-03-04 | STATUS: COMPLETE (2M steps, 486 seconds)
+
+Goal: Seal the second pit in deterministic fixed-start evaluation by loading d34
+and re-initializing W_pit[128]=-30.0, b_pit=+18.0. With direct=+2.1 at tl=0.53
+and estimated features_contribution≈-1.5, expected net≈+0.6 → second pit fires.
+
+What happened: Actual features_contribution at fixed-start step ~1314 is ≈ -2.3
+to -2.5 (not -1.5 as estimated). Direct +2.13 + features ≈ -2.3 = net ≈ -0.17
+→ still barely negative → second pit still doesn't fire in deterministic evaluation.
+
+Training showed large improvement: ep_rew_mean grew 1100→1610 (+46%), ep_len
+grew 937→1180 (+26%). The second pit IS firing stochastically during training
+(exploration noise pushes pit signal positive). Feature weights on pit row
+further reduced: 0.1730 → 0.1635 (-5.5% from d34's already-reduced baseline).
+
+RESULTS:
+  Fixed start (N=10, deterministic):
+    D35: reward=2688.25, laps=11, pits=1.0, completion=100%  [unchanged from d34]
+  Random start (N=20, deterministic):
+    D35: reward=1311.5, laps=6.05, pits=1.1, completion=55%  [vs d34: 1460, 6.70, 1.1, 60%]
+    (within noise for N=20; same pit behavior — 55% vs 60% = 11 vs 12 completions)
+
+DIAGNOSIS: Features contribution at the specific fixed-start trajectory step ~1314
+is ≈ -2.3 to -2.5. To overcome with direct component requires |W_pit[128]| × 0.53 > 2.5
+→ |W_pit[128]| > 4.72. Achievable with W=-40, b=+24, but diminishing returns approach.
+
+KEY INSIGHT: The second-pit problem is a deterministic-eval artifact. During stochastic
+training (ep_rew 1610, ep_len 1180), the second pit fires reliably. The fixed-start
+trajectory's specific frozen feature values at step ~1314 create a strong negative
+projection that resists the direct tyre_life signal.
+
+NEXT: d36 — Transfer fast driving from ppo_curriculum_v2 (26.9 m/s) into PitAwarePolicy.
+  Current driving speed is 17.7 m/s (d21 frozen). Faster driving → more laps → higher reward.
+  Alternative: continue direct-weight approach (W=-40, b=+24) for one more iteration.
