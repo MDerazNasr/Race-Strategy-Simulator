@@ -831,6 +831,20 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_pit_v4_d32.zip",
             "env_key":       "pit",
         },
+        {
+            "name":  "PPO Pit v4 D33 (d33)",
+            "color": "#1A237E",
+            # D33: Two-pit strategy — continue training d32 with lower LR (1e-5→1e-7).
+            # D32 survives to step 2000, so d33 training episodes regularly hit the
+            # second-pit window (~step 1314, tl≈0.53). PPO reinforces the second pit.
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4_d33.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4_d33.zip",
+            "env_key":       "pit",
+        },
     ]
 
     summaries = []
