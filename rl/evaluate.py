@@ -845,6 +845,20 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_pit_v4_d33.zip",
             "env_key":       "pit",
         },
+        {
+            "name":  "PPO Pit v4 D34 (d34)",
+            "color": "#4A148C",
+            # D34: Two-pit take 2 — re-init W_pit[128]=-20.0, b_pit=+12.0 so that
+            # the direct component at the 2nd-pit window (tl=0.53) is +1.40,
+            # large enough to overcome the -1.5 features noise found in d33.
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4_d34.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4_d34.zip",
+            "env_key":       "pit",
+        },
     ]
 
     summaries = []
