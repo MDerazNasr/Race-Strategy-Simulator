@@ -1273,3 +1273,34 @@ WHAT'S NEXT (d34):
   Re-initialize W_pit[128]=-20.0, b_pit=+12.0 (threshold still at tl≈0.60:
   -20×0.60+12=0). At second-pit state (tl=0.53): direct=+1.40 → overcomes -1.5.
   Train with LR cosine 1e-4→1e-6 (same as d32, not the too-low 1e-5 of d33).
+
+==============================================================================
+WEEK 5 / d34 — Pit v4 D34: Two-Pit Take 2 — RANDOM-START BREAKTHROUGH!
+==============================================================================
+
+Fix: Load d32, re-init W_pit[128]=-20.0, b_pit=+12.0 (threshold preserved at tl≈0.60:
+  -20×0.60+12=0). At second-pit window (tl=0.53): direct=+1.40 → overcomes -1.5 features.
+  LR cosine 1e-4→1e-6 (same as d32). 2M steps, 966 seconds.
+
+Training: KL 1e-3 to 1e-4 (real gradient, vs d33's frozen 1e-6). W_pit[:128] abs_mean
+  decreased -13.5% (0.1998→0.1730) — feature weights adapted to reduce their influence.
+  W_pit[128]: -20.0 → -19.97 (stable). Effective threshold: tl≈0.604.
+
+Results (fixed start, N=10):
+  d34: reward=2688.46, laps=11, steps=2000, pits=1.0 — marginal improvement (+4.63 vs d32).
+  Second pit still doesn't fire deterministically in fixed-start trajectory (features at step
+  ~1314 still just barely tip pit_signal negative; reduced feature weights help in general
+  but not enough for this specific trajectory).
+
+Results (random start, N=20) — BREAKTHROUGH:
+  d34: reward=1907.93 ± 976.28, laps=9.25, pits=1.85, completion=85% ← BEST PIT POLICY!
+  d32: reward=1283.40, laps=5.80, completion=40%
+  → +49% reward, +45% completion, 1.85 pits (second pit IS firing in diverse conditions)
+  → 85% completion: best of all pit policies, approaching curriculum v2's 60% (no pits)
+  → Feature weights adapted (-13.5%): PPO learned to reduce feature influence on pit row
+
+WHY FIXED=1 PIT but RANDOM=1.85 PITS:
+  Fixed-start uses deterministic mean action. The one specific trajectory at step ~1314
+  still has features that just barely tip pit_signal negative. Random-start sees diverse
+  car states at the second-pit window — in most, the direct component (+1.48 at tl=0.53)
+  overcomes the features noise → second pit fires → 85% completion, 9.25 laps.
