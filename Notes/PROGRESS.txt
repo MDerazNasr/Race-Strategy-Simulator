@@ -1241,3 +1241,35 @@ Key insight — WHY D32 WORKED:
   PitAwarePolicy bypasses this: obs[11] is appended DIRECTLY to the 128-dim latent.
   The 129th action_net weight provides a guaranteed linear path from tyre_life to pit_signal.
   Gradient direction was positive throughout training for the first time.
+
+==============================================================================
+WEEK 5 / d33 — Pit v4 D33: Two-Pit Attempt — Second Bottleneck Found
+==============================================================================
+
+Goal: teach agent a two-pit strategy by continuing training from d32 (lower LR).
+  Architecture: PitAwarePolicy (unchanged), LR cosine 1e-5→1e-7 (10× lower than d32)
+  Start: ppo_pit_v4_d32.zip, 2M steps, same freeze (131 trainable params)
+  Hypothesis: d32 survives to step 2000, so training will encounter second-pit
+    window (step ~1314, tl≈0.53, P(pit>0)=86% by direct component).
+
+Training: ep_rew_mean 416 → 1110 (iter 977). approx_kl 1e-6 early → 1e-9 final.
+  Weight change: W_pit[128] -10.4882 → -10.4927 (<0.05% — essentially frozen).
+  LR too low to shift weights meaningfully.
+
+Results (fixed start, N=10):
+  d33: reward=2683.83, laps=11, steps=2000, pits=1.0 — IDENTICAL to d32. No gain.
+
+Results (random start, N=20):
+  d33: reward=1126.82, laps=5.10, pits=0.60, completion=40% — marginally WORSE than d32.
+
+ROOT CAUSE — SECOND FEATURE BOTTLENECK:
+  The diagnostic "P(pit)=86% at tl=0.53" used direct component only.
+  True pit_signal = features_contribution + 0.94. Features at step ~1314 give
+  features_contribution ≈ -1.5 → net signal ≈ -0.56 (negative → no pit).
+  W_pit[128] would need to reach ~-20 to dominate features noise.
+  LR of 1e-5→1e-7 caused <0.05% weight change — insufficient to overcome this.
+
+WHAT'S NEXT (d34):
+  Re-initialize W_pit[128]=-20.0, b_pit=+12.0 (threshold still at tl≈0.60:
+  -20×0.60+12=0). At second-pit state (tl=0.53): direct=+1.40 → overcomes -1.5.
+  Train with LR cosine 1e-4→1e-6 (same as d32, not the too-low 1e-5 of d33).

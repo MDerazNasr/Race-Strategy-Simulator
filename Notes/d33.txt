@@ -1,0 +1,148 @@
+==============================================================================
+WEEK 5 / d33 — Pit v4 D33: Two-Pit Strategy Attempt — Second Bottleneck Found
+==============================================================================
+
+DATE: 2026-03-04
+STATUS: COMPLETE (2M steps, 980 seconds)
+
+==============================================================================
+WHAT WAS BUILT
+==============================================================================
+
+D33 attempted to teach the agent a two-pit strategy by continuing training
+from d32's PitAwarePolicy checkpoint with a lower learning rate.
+
+HYPOTHESIS:
+  D32 achieves 100% fixed-start completion (step 2000) with 1 pit. After the
+  first pit (step ~643, tl resets to 1.0), tyre_life drops below 0.60 again
+  at step ~1314. The direct tyre_life connection (W_pit[128]=-10.49) gives:
+    pit_signal_direct = -10.49 × 0.53 + 6.50 = +0.94
+    P(pit>0) = 86% (direct component only)
+  This should trigger the second pit. But d32 evaluation showed pits=1.0
+  (exactly 1 pit). D33 would fix this by training from d32 with 2M steps,
+  letting PPO reinforce the second pit via voluntary_pit_reward.
+
+SETUP:
+  Start:       ppo_pit_v4_d32.zip (no weight copy — load directly)
+  Architecture: PitAwarePolicy (unchanged: Linear(129,3) action_net)
+  LR:          cosine 1e-5 → 1e-7  (10× lower than d32's 1e-4→1e-6)
+  Steps:       2M
+  Freeze:      Same three-layer freeze as d32 (131 trainable policy params)
+  Environment: make_env_pit_d30 (voluntary_pit_reward=True, threshold=0.60)
+
+==============================================================================
+TRAINING LOG
+==============================================================================
+
+Training trajectory (selected ep_rew_mean by iteration):
+  Iter   1: ep_rew=  416, ep_len=  267
+  Iter  10: ep_rew=  991, ep_len=  771   ← reward growing
+  Iter  20: ep_rew= 1110, ep_len=  887
+  Iter  50: ep_rew= ~1050 (oscillating)
+  Iter 977: ep_rew= 1110, ep_len=  883   ← final (LR=1e-7)
+
+approx_kl trajectory:
+  Early: 1e-6 to 1e-5 (healthy gradient)
+  Final: 1e-9 to 1e-8 (essentially frozen — LR too low)
+
+Post-training pit weights:
+  action_net.weight[2, :128] abs_mean: 0.199839 → 0.200211 (+0.19%)
+  action_net.weight[2,  128]:          -10.4882 → -10.4927 (<0.05% change!)
+  action_net.bias[2]:                  +6.4997  → +6.4952  (barely moved)
+  log_std[2]:                           -0.1462 → -0.1512  (barely moved)
+  Features drift: 0.00e+00 (perfect freeze)
+  Throttle/steer drift: 0.00e+00 (perfect freeze)
+
+Post-training pit probabilities (direct component only):
+  tl=0.30: pit_direct=+3.35  P(pit>0)≈100%  [pit]
+  tl=0.45: pit_direct=+1.77  P(pit>0)≈ 98%  [pit]
+  tl=0.53: pit_direct=+0.93  P(pit>0)≈ 86%  [2nd pit window — direct only!]
+  tl=0.60: pit_direct=+0.20  P(pit>0)≈ 59%  [hold]
+  tl=0.80: pit_direct=-1.90  P(pit>0)≈  1%  [hold]
+  tl=0.90: pit_direct=-2.95  P(pit>0)≈  0%  [hold]
+
+==============================================================================
+RESULTS
+==============================================================================
+
+FIXED START (N=10, deterministic):
+  D33: reward=2683.83, laps=11, steps=2000, pits=1.0, completion=100%
+  D32: reward=2683.83, laps=11, steps=2000, pits=1.0, completion=100%
+  → D33 = D32. ZERO improvement. Second pit still does not fire.
+
+RANDOM START (N=20):
+  D33: reward=1126.82 ± 1330.76, laps=5.10, pits=0.60, completion=40%
+  D32: reward=1134.82 ± 1204.84, laps=5.25, pits=0.85, completion=45%
+  → D33 is marginally WORSE than d32 (fewer pits, lower reward, 5% less completion).
+
+==============================================================================
+ROOT CAUSE ANALYSIS — SECOND FEATURE BOTTLENECK
+==============================================================================
+
+WHY THE SECOND PIT DOESN'T FIRE:
+
+  The diagnostic "P(pit>0)≈86% at tl=0.53" was misleading — it computed the
+  DIRECT component only, ignoring the features[:128] @ W_pit[:128] contribution.
+  The actual pit_signal in deterministic evaluation is:
+    pit_signal = (features @ W_pit[:128]) + W_pit[128] × tl + b_pit
+                = features_contribution + (-10.49 × 0.53) + 6.50
+                = features_contribution + 0.94
+
+  For the second pit NOT to fire deterministically, features_contribution < -0.94.
+  At step ~1314 (second-pit window), the frozen features encode a state that
+  gives features_contribution ≈ -1.5 or more negative. The total pit_signal is
+  therefore negative (≈ -0.56), and the deterministic mean action = negative
+  → no pit fires.
+
+  This is a SECOND FEATURE BOTTLENECK, different from d26-d31:
+  - D26-D31 bottleneck: features don't encode tyre_life linearly AT ALL
+    → Fixed by d32 (direct tyre_life connection)
+  - D33 bottleneck: features CORRECTLY distinguish early vs late episode
+    but their contribution to the pit row is NEGATIVE for late-episode states
+    → Direct component (+0.94) is insufficient to overcome this
+
+WHY THE LR FIX DIDN'T WORK:
+  LR of 1e-5→1e-7 was too low to shift W_pit[128] enough.
+  Change needed: W_pit[128] from -10.49 → approximately -16 or more
+  to achieve pit_signal > 0 at tl=0.53 despite features_contribution ≈ -1.5.
+    required: -16 × 0.53 + b ≥ 0  with  -16 × 0.62 + b = 0 → b = 9.92
+    then: -16 × 0.53 + 9.92 = +1.44  (overcomes -1.5 features if b is also adjusted)
+  The actual weight change was <0.05% — essentially zero.
+
+WHY TRAINING EP_LEN (~880) DIDN'T REACH THE SECOND-PIT WINDOW:
+  Training episodes average 880 steps (random starts, stochastic crashes).
+  The second-pit window appears at step ~1314 in fixed-start trajectories.
+  Only a small fraction of TRAINING episodes ever reach step 1314.
+  → Gradient signal from second pits was too weak to overcome the low LR.
+
+==============================================================================
+WHAT'S NEXT (d34)
+==============================================================================
+
+The second bottleneck requires a LARGER shift in W_pit[128]:
+  - d32 had: W_pit[128]=-10.49, b=+6.50 → threshold at tl≈0.62
+  - To overcome features_noise at step 1314: need W_pit[128] ≈ -16, b ≈ +9.92
+
+Two options for d34:
+
+OPTION A: Re-initialize + retrain with larger W_pit[128]
+  - Start fresh PitAwarePolicy from d32 weights
+  - Override: W_pit[128] = -20.0, b_pit = +12.0 (threshold still at tl≈0.60)
+    -20×0.60 + 12.0 = 0 → threshold preserved
+    -20×0.53 + 12.0 = +1.40 → overcomes features_contribution at step 1314
+  - Train with LR cosine 1e-4 → 1e-6 (same as d32, NOT the low 1e-5 of d33)
+  - This gives the pit row enough signal to potentially learn the second pit
+
+OPTION B: Ablate features component for pit row
+  - Observation: features[:128] contribution at step 1314 is negative and
+    opposes the correct pit decision. These features encode "late episode"
+    state that the pit row misinterprets.
+  - Drastic approach: zero out W_pit[:128] (only use direct tyre_life connection)
+  - Then retrain from d32 using only tyre_life direction
+  - Risk: losing whatever correct state-conditioning the features provide at
+    other states (e.g., correct avoidance of pitting on straights)
+
+RECOMMENDED (Option A): Larger W_pit[128] initialization, same LR as d32.
+  The direct tyre_life component needs to dominate the features noise at worn
+  states. Doubling |W_pit[128]| from -10 to -20 (with b adjusted to maintain
+  threshold at tl=0.60) should achieve this.
