@@ -1342,3 +1342,40 @@ projection that resists the direct tyre_life signal.
 NEXT: d36 — Transfer fast driving from ppo_curriculum_v2 (26.9 m/s) into PitAwarePolicy.
   Current driving speed is 17.7 m/s (d21 frozen). Faster driving → more laps → higher reward.
   Alternative: continue direct-weight approach (W=-40, b=+24) for one more iteration.
+
+──────────────────────────────────────────────────────────────────────────────
+WEEK 6 / D36 — Pit v4 D36: Full Unfreeze — MAJOR BREAKTHROUGH
+──────────────────────────────────────────────────────────────────────────────
+DATE: 2026-03-04 | STATUS: COMPLETE (2M steps, 1107 seconds)
+
+APPROACH: Two phases. First attempt (cv2 direct transfer) FAILED — cv2 was trained
+WITHOUT tyre degradation, so frozen driving crashed (ep_len≈100, negative reward).
+ROOT CAUSE: mu = mu_base × tyre_life → half grip at tyre_life=0.5 → cv2 slides.
+
+Revised: full unfreeze from d35 (all 36,874 params trainable). W_pit[128]=-30
+acts as anchor — gradient doesn't meaningfully change it, pit strategy preserved.
+
+TRAINING: iter 1 = ep_rew=3010 (immediately beats d35's 2688!). Dip after
+large gradient update, then steady climb. Final: ep_rew≈2260, ep_len≈1200.
+approx_kl: 2-8e-3 early (real learning) → 1e-4 final. policy_net drifted +12-15%.
+
+POST-TRAINING: W_pit[128]: -29.99 → -30.02 (UNCHANGED ✓), threshold tl≈0.599 ✓
+
+RESULTS:
+  Fixed start (N=10, deterministic):
+    D36: reward=3426.68, laps=15, steps=2000, speed=23.60 m/s, lateral=0.456 m, pits=3
+    D35: reward=2688.25, laps=11, speed=17.69 m/s, lateral=1.158 m, pits=1
+    Curriculum v2: reward=4531, laps=17, speed=26.92 m/s, pits=0
+
+    D36 improvements: +27.5% reward, +4 laps, +33% speed, -61% lateral error, +2 pits!
+    D36 vs cv2 gap: -24% reward, -2 laps, -3.3 m/s speed
+
+  Random start (N=20, deterministic):
+    D36: reward=1754, laps=8.30, pits=2.2, completion=50%  (vs D35: 1481, 6.95, 1.4, 65%)
+    Higher reward per episode but lower completion (faster driving crashes at random starts)
+
+KEY INSIGHT: The direct tyre_life anchor (W_pit[128]=-30) preserved pit strategy
+during full unfreeze. PPO improved driving speed (+33%), track precision (-61% error),
+and naturally learned 3 pit stops as faster driving depletes tyres faster.
+
+NEXT: d37 — Train d36 longer (4M more steps) to close speed gap vs curriculum v2.

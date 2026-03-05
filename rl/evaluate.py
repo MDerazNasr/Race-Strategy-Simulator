@@ -874,6 +874,21 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_pit_v4_d35.zip",
             "env_key":       "pit",
         },
+        {
+            "name":  "PPO Pit v4 D36 (d36)",
+            "color": "#1B5E20",
+            # D36: Fast driving transfer — ppo_curriculum_v2 features (26.9 m/s)
+            # into PitAwarePolicy. 11D→12D obs expansion: tyre_life col set to 0 in
+            # policy_net[0] so driving features are unchanged. Pit row initialized
+            # fresh: W_pit[128]=-10, b=+7 (threshold tl≈0.70). Driving frozen.
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4_d36.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4_d36.zip",
+            "env_key":       "pit",
+        },
     ]
 
     summaries = []

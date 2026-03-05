@@ -1,0 +1,155 @@
+==============================================================================
+WEEK 6 / d36 — Pit v4 D36: Full Unfreeze from D35 — MAJOR BREAKTHROUGH
+==============================================================================
+
+DATE: 2026-03-04
+STATUS: COMPLETE (2M steps, 1107 seconds)
+
+==============================================================================
+WHAT WAS BUILT
+==============================================================================
+
+D36 attempted "fast driving transfer" from ppo_curriculum_v2 (26.9 m/s) into
+PitAwarePolicy. First attempt FAILED (cv2 not trained with tyre degradation →
+mu = mu_base × tyre_life changes car grip → cv2's frozen driving crashed at
+ep_len≈100-185, negative reward).
+
+REVISED APPROACH: Full unfreeze from d35.
+Load d35 (11 laps, 2688 reward, 1 pit, 17.7 m/s). Unfreeze ALL 36,874 policy
+parameters. Let PPO jointly optimize driving speed AND pit strategy.
+
+WHY THIS WORKS:
+  - D32-D35 froze features to protect driving while learning pit row
+  - After 4 training cycles, the pit row is robust: W_pit[128]=-30 (very strong
+    direct tyre_life signal)
+  - The voluntary pit reward (+300 at tl<0.60) still provides pit incentive
+  - W_pit[128]=-30 is so large that gradient would need many steps to override it
+  - Full unfreeze lets features EVOLVE for faster driving + better track following
+
+==============================================================================
+FIRST ATTEMPT DETAILS (FAILED — CV2 DIRECT TRANSFER)
+==============================================================================
+
+Tried to copy ppo_curriculum_v2 weights into PitAwarePolicy:
+- 11D obs → 12D obs: pad tyre_life column with 0 in policy_net[0]
+- action_net rows 0,1: copy cv2 throttle/steer
+- action_net row 2: fresh pit row (W[128]=-10, b=+7)
+Result: ep_len≈100-185 steps, ep_rew=-232 in first rollout, never recovered.
+ROOT CAUSE: cv2 was trained on F1Env WITHOUT tyre_degradation. The degradation
+env reduces mu (friction coefficient): mu = mu_base × max(0.1, tyre_life).
+At tyre_life=0.5: only half grip → car slides → cv2's frozen driving policy
+(calibrated for full grip) crashes on worn tyres.
+
+==============================================================================
+TRAINING LOG (REVISED APPROACH — FULL UNFREEZE)
+==============================================================================
+
+Setup:
+  Start checkpoint: ppo_pit_v4_d35.zip (W_pit[128]=-30.0, b=+18.0)
+  All 36,874 params trainable (vs 131 in d32-d35)
+  LR: cosine(1e-4 → 1e-6), same as d32-d35
+  Environment: make_env_pit_d30 (voluntary_pit_reward=True, threshold=0.60)
+  Steps: 2M, Time: 1107 seconds
+
+Training trajectory:
+  Iter   1: ep_rew=3010, ep_len=2000  ← IMMEDIATE BREAKTHROUGH (3010 > d35's 2688!)
+  Iter   2: ep_rew=1100, ep_len=866   ← policy destabilized by large gradient update
+  Iter   5: ep_rew=1610, ep_len=1210  ← recovering quickly
+  Iter  25: ep_rew=1300, ep_len=941   ← stabilizing
+  Iter 100: ep_rew≈1800              ← settling into new optimum
+  Iter 977: ep_rew≈2260, ep_len≈1200 ← final (LR=1e-6)
+
+Training KL: 2e-3 to 8e-3 early (large policy updates!) → 1e-4 late
+clip_fraction: 6-20% early (major parameter changes) → <1% late
+This is much larger than d32-d35's approx_kl of 1e-8 to 1e-4!
+
+Post-training weights:
+  policy_net[0] abs_mean: 0.059109 → 0.066465 (+12.4% — features EVOLVED)
+  policy_net[2] abs_mean: 0.018601 → 0.021355 (+14.8% — features EVOLVED)
+  action_net[0,:] abs_mean: 0.049627 → 0.061500 (+23.8% throttle adaptation)
+  action_net[1,:] abs_mean: 0.026937 → 0.023231 (-13.7% steer refinement)
+  action_net[2,:128] abs_mean: 0.163460 → 0.161208 (barely changed ← pit features stable)
+  action_net[2, 128]: -29.9860 → -30.0205 (UNCHANGED ← direct tyre_life preserved)
+  action_net.bias[2]: +18.0184 → +17.9965 (UNCHANGED ← threshold preserved)
+  log_std: [-0.917, -2.342, -0.168] → [-1.397, -2.909, -0.167]
+  Effective threshold: tl ≈ 0.599 (was 0.601 in d35, essentially identical ✓)
+
+Post-training pit probabilities (direct component):
+  tl=0.30: P(pit>0)=100%  tl=0.45: P(pit>0)=100%
+  tl=0.53: P(pit>0)= 99%  [2nd pit window — still fires!]
+  tl=0.60: P(pit>0)= 49%  tl=0.70: P(pit>0)=  0%
+
+==============================================================================
+RESULTS
+==============================================================================
+
+FIXED START (N=10, deterministic) — BREAKTHROUGH:
+  D36: reward=3426.68, laps=15, steps=2000, speed=23.60 m/s, lateral_err=0.456 m, pits=3
+  D35: reward=2688.25, laps=11, steps=2000, speed=17.69 m/s, lateral_err=1.158 m, pits=1
+  D34: reward=2688.46, laps=11, steps=2000, speed=17.69 m/s, lateral_err=1.157 m, pits=1
+  Expert: reward=2909, laps=11
+  Curriculum v2: reward=4531, laps=17, speed=26.9 m/s (NO pits)
+
+  D36 improvements over D35:
+    +27.5% reward (3427 vs 2688)
+    +4 laps (15 vs 11)
+    +33% speed (23.60 vs 17.69 m/s)
+    -61% lateral error (0.456 vs 1.158 m — dramatically tighter track following!)
+    +2 extra pit stops (3 vs 1 — the 2nd AND 3rd pit windows now fire!)
+
+  D36 vs curriculum v2:
+    Speed:  23.60 vs 26.9 m/s (-12%, gap partially closed)
+    Laps:   15 vs 17 (-2 laps; each pit costs some time)
+    Reward: 3427 vs 4531 (-24%; each pit has -200 penalty but +300 bonus = +100 net)
+
+RANDOM START (N=20, deterministic):
+  D36: reward=1754.16, laps=8.30, pits=2.2, completion=50%,  speed=16.96 m/s
+  D34: reward=1609.26, laps=7.30, pits=1.1, completion=65%,  speed=13.94 m/s
+  D35: reward=1481.51, laps=6.95, pits=1.4, completion=65%,  speed=13.32 m/s
+
+  D36 random start: higher reward (+9% vs d34) and more laps (+1 lap), but lower
+  completion rate (50% vs 65%). The faster driving (16.96 m/s vs 13-14 m/s)
+  gives higher reward when successful, but crashes more at random start positions.
+
+==============================================================================
+ANALYSIS — WHY D36 SUCCEEDED WHERE D32-D35 COULDN'T
+==============================================================================
+
+D32-D35 froze mlp_extractor.policy_net to preserve driving while learning pit row.
+This worked for pit learning (W_pit[128] became -30, strong direct connection) but
+locked driving speed at d21's suboptimal 17.7 m/s.
+
+D36's full unfreeze (36,874 params) allowed PPO to jointly optimize:
+1. FASTER DRIVING: features evolved (+12-15%), throttle outputs grew (+24%), steer
+   became more precise (-14%). Speed jumped from 17.69 → 23.60 m/s (+33%).
+2. TIGHTER TRACK FOLLOWING: lateral error 1.158 → 0.456 m (-61%). The policy
+   learned to hug the track much better.
+3. MORE PIT STOPS: 3 pits vs 1. With faster driving, tyres wear faster → more pit
+   windows within 2000 steps. The W_pit[128]=-30 direct connection
+   remained completely intact (barely changed by training), so all 3 windows fired.
+
+KEY INSIGHT: The direct tyre_life connection (W_pit[128]=-30) acted as a ANCHOR
+during full unfreeze. Despite all 36k params being trainable, the gradient didn't
+meaningfully change W_pit[128] because:
+  - The voluntary pit reward (+300) reinforces the current pit timing
+  - The gradient for W_pit[128] points in the right direction already
+  - 2M steps / 36k params = gradient budget spread across many dimensions
+
+==============================================================================
+WHAT'S NEXT (d37)
+==============================================================================
+
+D36 achieves 15 laps and 3 pits at 3427 reward. Gap to curriculum v2 ceiling:
+  D36:   3427 reward, 15 laps, 23.60 m/s, 3 pits, 0.456 m lateral error
+  CV2:   4531 reward, 17 laps, 26.92 m/s,  0 pits, 0.678 m lateral error
+
+Remaining gap = +1105 reward. Sources:
+  Speed: 23.60 → 26.92 m/s (+14%) → more laps → more reward
+  Laps: 15 → 17 → +2 laps per ep → more reward
+  Pit overhead: 3 pits at -200 each = -600 penalty (even with +900 bonus = +300 net)
+
+Options for d37:
+1. Train d36 longer (4M more steps) — let PPO continue improving driving speed
+2. Accept d36 as milestone and run final benchmark (random start N=100)
+3. Increase training speed bonus or reward shaping to incentivize faster driving
+4. Try 3M total steps from d35 (same approach, more budget)
