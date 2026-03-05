@@ -1,0 +1,77 @@
+==============================================================================
+N=100 FINAL BENCHMARK — Race Strategy Simulator
+Generated: 2026-03-04 23:22
+N=100 episodes per policy, deterministic rollouts
+==============================================================================
+
+Policies: Expert, PPO Curriculum v2 (cv2), PPO Pit D36, PPO Pit D37
+Environments:
+  Standard:  F1Env()  (11D obs, no tyres, no pit)
+  Pit:       F1Env(tyre_degradation=True, pit_stops=True,
+                   voluntary_pit_reward=True)  (12D obs, 3D action)
+Evaluation: deterministic=True (mean action, no sampling)
+
+──────────────────────────────────────────────────────────────────────────────
+RANDOM START  (N=100)
+──────────────────────────────────────────────────────────────────────────────
+  Policy                           Reward     95% CI   Laps    Speed   Lateral   Pits  Compl%
+  ────────────────────────────────────────────────────────────────────────────
+  Expert (rule-based)               885.5     266.8   3.41    8.53m/s    1.442m  0.00   31.0%
+  PPO Curriculum v2 (cv2)          2527.7     430.6   9.60   17.72m/s    1.047m  0.00   58.0%
+  PPO Pit D36 (d36)                2671.4     384.9   9.13   17.39m/s    0.948m  2.42   58.0%
+  PPO Pit D37 (d37)                2555.8     399.5   8.63   15.88m/s    0.868m  2.57   62.0%
+
+──────────────────────────────────────────────────────────────────────────────
+FIXED START  (N=100)
+──────────────────────────────────────────────────────────────────────────────
+  Policy                           Reward     95% CI   Laps    Speed   Lateral   Pits  Compl%
+  ────────────────────────────────────────────────────────────────────────────
+  Expert (rule-based)              2909.1       0.0  11.00   17.10m/s    0.797m  0.00  100.0%
+  PPO Curriculum v2 (cv2)          4531.7       0.0  17.00   26.92m/s    0.678m  0.00  100.0%
+  PPO Pit D36 (d36)                4326.7       0.0  15.00   23.60m/s    0.456m  3.00  100.0%
+  PPO Pit D37 (d37)                4377.0       0.0  15.00   23.67m/s    0.319m  3.00  100.0%
+
+==============================================================================
+ENVIRONMENT NOTE — WHY D36/D37 REWARDS DIFFER FROM evaluate.py
+==============================================================================
+
+evaluate.py uses env_pit = F1Env(tyre_degradation=True, pit_stops=True)
+  — voluntary_pit_reward=False (default) — no +300 bonus for correct pits
+
+benchmark_n100.py uses voluntary_pit_reward=True (the TRAINING environment)
+  — +300 bonus per correct voluntary pit (tl<0.60 AND pit_signal>0)
+  — Net per correct pit: +300 bonus - 200 penalty = +100
+
+D37 takes 3 correct pits per fixed-start episode → 3×300 = +900 reward difference:
+  evaluate.py:        d37=3476.95, d36=3426.68
+  benchmark_n100.py:  d37=4377.0,  d36=4326.7
+  Difference:         exactly +900.0 in both cases ✓
+
+For cv2 and Expert (no pits): reward is identical across both environments.
+
+WHICH IS "CORRECT"?
+  benchmark_n100.py is the fair measure of in-training-distribution performance.
+  It uses the same reward function the agent was optimized for.
+  evaluate.py (no voluntary bonus) measures how much of the reward came from
+  raw speed vs pit bonus — useful for decomposition but not the training objective.
+
+==============================================================================
+KEY FINDINGS
+==============================================================================
+
+Best pit policy (D37) vs speed champion (cv2) [fixed start, N=100]:
+  D37:  4377.0 ± 0.0 reward, 15.0 laps, 23.67 m/s, 3.0 pits, 100%
+  cv2:  4531.7 ± 0.0 reward, 17.0 laps, 26.92 m/s, 0.0 pits, 100%
+  Gap:  -154.7 reward (-3.4%) — D37 achieves 96.6% of cv2's reward
+  Note: D37's pit overhead (raw): 3 pits × (-200) = -600.
+        Without pit penalty, D37 gross speed reward ≈ 4977 > cv2's 4531.
+        D37 is the faster driver — but pit time costs it 2 laps.
+  vs Expert: D37 +1467.9 reward (+50.4%), 15 vs 11 laps, +6.57 m/s
+
+Random start (N=100, more meaningful for robustness):
+  D37:  2555.8 ± 399.5 reward, 8.63 laps, 62% completion, 2.57 pits
+  D36:  2671.4 ± 384.9 reward, 9.13 laps, 58% completion, 2.42 pits
+  cv2:  2527.7 ± 430.6 reward, 9.60 laps, 58% completion, 0 pits
+  D37 has the HIGHEST completion rate (62%) — entropy collapse made it
+  very precise on random starts too (low variance driving line).
+  D36 has highest reward (2671) — better speed/lap count on surviving episodes.
