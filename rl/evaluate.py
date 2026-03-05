@@ -503,6 +503,13 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
     # Pit-stop env (12D obs, 3D actions) — for ppo_pit policy (d18).
     # Separate env needed because action space must match the policy.
     env_pit = F1Env(tyre_degradation=True, pit_stops=True)
+    # Multi-agent env (13D obs, 2D actions) — for d39 policy.
+    # Optional import: only instantiated if the env module exists.
+    try:
+        from env.f1_multi_env import F1MultiAgentEnv
+        env_multi = F1MultiAgentEnv()
+    except ImportError:
+        env_multi = None
 
     start_label = "FIXED START" if fixed_start else "RANDOM START"
     print("=" * 60)
@@ -917,6 +924,24 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_pit_v4_d38.zip",
             "env_key":       "pit",
         },
+        {
+            "name":  "PPO Multi-Agent D39 (d39)",
+            "color": "#7B1FA2",
+            # D39: Competitive racing — ego PPO vs ExpertDriver (max_speed=22 m/s).
+            # Extends cv2 (11D) to 13D obs via extend_obs_dim. New dims:
+            #   [11] track_gap ∈ [-1, 1] (positive = opponent ahead)
+            #   [12] opp_speed_norm = clip(opp.v / 30.0, 0, 1)
+            # Additional reward: +0.5/step when ahead, +200 overtake bonus (200-step
+            # cooldown), -0.5/step within 3m (soft collision deterrent).
+            # ent_coef=0.01 from start — prevents log_std collapse (d38 lesson).
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_multi_agent_d39.zip"), device,
+                obs_dim=13,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_multi_agent_d39.zip",
+            "env_key":       "multi",
+        },
     ]
 
     summaries = []
@@ -944,6 +969,11 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
         #   - all others   → env (11D obs, 2D action space, standard)
         if cfg.get("env_key") == "pit":
             eval_env = env_pit
+        elif cfg.get("env_key") == "multi":
+            if env_multi is None:
+                print(f"  Skipping: {cfg['name']} (env.f1_multi_env not available)")
+                continue
+            eval_env = env_multi
         elif cfg.get("optional_file") == "ppo_tyre.zip":
             eval_env = env_tyre
         else:
