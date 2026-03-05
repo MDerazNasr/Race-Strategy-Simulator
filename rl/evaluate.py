@@ -903,6 +903,20 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_pit_v4_d37.zip",
             "env_key":       "pit",
         },
+        {
+            "name":  "PPO Pit v4 D38 (d38)",
+            "color": "#1B5E20",
+            # D38: Entropy-boosted unfreeze from d37.
+            # D37 log_std collapsed (steer std 0.57→0.05) — ent_coef=0.01 restores
+            # exploration. Entropy bonus pushes log_std up, potentially unlocking lap 16.
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_pit_v4_d38.zip"), device,
+                obs_dim=12,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_pit_v4_d38.zip",
+            "env_key":       "pit",
+        },
     ]
 
     summaries = []

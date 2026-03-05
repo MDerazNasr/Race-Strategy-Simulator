@@ -1,0 +1,115 @@
+==============================================================================
+D38 — Pit v4 D38: Entropy-Boosted Training from D37 (Week 6)
+==============================================================================
+DATE: 2026-03-04
+STATUS: FAILED — REGRESSION FROM D37
+
+Script: rl/train_ppo_pit_v4_d38.py
+Model:  rl/ppo_pit_v4_d38.zip
+Logs:   runs/ppo_pit_v4_d38/
+
+==============================================================================
+WHAT WAS ATTEMPTED
+==============================================================================
+
+D37 converged to a local optimum with collapsed log_std:
+  steer std: 0.57 (d36) → 0.05 (d37)  ← nearly deterministic
+  throttle std: 0.77 (d36) → 0.18 (d37)
+
+With std≈0.05 for steer, the policy drives a fixed line and cannot explore
+faster trajectories. To unlock lap 16 (requiring ~26.9 m/s vs current 23.67 m/s),
+exploration is needed.
+
+D38 approach: load d37, set ent_coef=0.01 (SB3 default is 0.0).
+The entropy coefficient adds a bonus to the PPO objective:
+  Total loss = PPO_clip_loss + value_loss − ent_coef × H(π)
+Since SB3 minimizes the total loss, maximizing H(π) (entropy) is a bonus.
+For a Gaussian policy, ∂H/∂log_std = 1 for each dim → pushes log_std UP.
+Expected effect: steer std rises from 0.05 back toward 0.3-0.5, restoring
+exploration and potentially finding faster driving lines.
+
+==============================================================================
+WHAT HAPPENED
+==============================================================================
+
+Entropy DID partially recover:
+  D38 post-training log_std = [-1.281, -2.538, 0.046]
+  D38 std                   = [ 0.278,  0.079, 1.047]
+  vs D37:                     [ 0.181,  0.053, 0.710]
+
+  Throttle std: 0.181 → 0.278  (+53%)  ← entropy worked
+  Steer std:    0.053 → 0.079  (+48%)  ← partial recovery (still low)
+  Pit std:      0.710 → 1.047  (+47%)  ← also increased (unintended side effect)
+
+Pit anchor preserved:
+  W_pit[128] = -30.1135 (d37: -30.0756) — barely changed ✓
+  threshold  = 0.596   (d37: 0.598)    — stable ✓
+
+But driving DESTABILIZED:
+
+RESULTS:
+  Fixed start (N=10, deterministic):
+    D38: reward=1730.66, laps=7, speed=23.67 m/s, lateral=0.430 m, pits=1
+         completion=0%  ← CRASHED at step ~982 (lap 7)
+    D37: reward=3476.95, laps=15, speed=23.67 m/s, lateral=0.319 m, pits=3
+         completion=100%
+
+  Random start (N=20):
+    D38: reward≈1086, completion=30%, laps=5.90, pits=2.35
+    D36: reward≈1559, completion=40%, laps=7.50, pits=2.10  (for reference)
+
+Regression: -1746 reward, -8 laps, 0% vs 100% completion, 1 pit vs 3 pits.
+
+==============================================================================
+ROOT CAUSE ANALYSIS
+==============================================================================
+
+The entropy bonus destabilized the driving policy before faster lines were found.
+
+Timeline of failure:
+  1. D37's steer std = 0.05: the policy drives a precise, narrow line.
+     Any deviation from this line (added noise from entropy boost) risks going off-track.
+  2. Entropy bonus adds noise to ALL action dimensions — throttle, steer, AND pit.
+     The steer noise (even small: 0.05→0.079) perturbs the carefully tuned trajectory.
+  3. The policy tries to adapt to the new, noisier action distribution.
+     It finds a DIFFERENT local optimum with lower performance.
+  4. The driving trajectory now crashes at lap 7 — the same point where d21-d31 crashed
+     before the full-unfreeze improvement. The entropy boost effectively un-did d36's
+     driving improvement.
+  5. Pit std also increased (0.71→1.047), making pit decisions more erratic:
+     only 1 pit in fixed-start vs 3 pits for d37. The pit strategy degraded too.
+
+Why ent_coef=0.01 from d37 specifically failed (vs from d36):
+  D37's log_std was already collapsed. The policy lived in a very narrow basin.
+  Adding entropy to a collapsed policy is like adding noise to a precisely tuned
+  system — it breaks the precision before the policy can adapt to find something better.
+  If ent_coef=0.01 had been applied from d36 (where std was still 0.57 for steer),
+  the baseline exploration was higher and the policy might have been more robust
+  to the entropy-induced perturbations.
+
+==============================================================================
+LESSON LEARNED
+==============================================================================
+
+"Restoring entropy after collapse is harder than preventing collapse in the first place."
+
+D38 tried to fix the log_std collapse AFTER it happened. This didn't work because:
+  — The policy was in a narrow local optimum with near-deterministic steering
+  — Adding exploration noise perturbed it out of that optimum to a worse place
+  — The better approach: PREVENT the collapse (set ent_coef=0.01 from d36, or earlier)
+
+For future work:
+  — If starting a new training run from d36: use ent_coef=0.01 from the beginning
+  — Monitor log_std during training; if steer std drops below 0.2, add entropy
+  — Alternative: use a minimum std floor (clip log_std to >= -1.6 → std >= 0.2)
+
+==============================================================================
+FINAL STATUS
+==============================================================================
+
+D37 remains the project best pit policy.
+D38 is kept as a documented failure for the lessons it provides.
+
+Best results in the project:
+  Best pit policy:   D37 — 3477 reward, 15 laps, 23.67 m/s, 3 pits, 100%
+  Best speed policy: cv2 — 4531 reward, 17 laps, 26.92 m/s, 0 pits, 100%
