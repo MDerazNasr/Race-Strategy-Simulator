@@ -1,0 +1,182 @@
+==============================================================================
+D37 — Pit v4 D37: Continue Full Unfreeze (Week 6)
+==============================================================================
+DATE: 2026-03-04
+STATUS: COMPLETE (2M steps, ~939 seconds)
+
+==============================================================================
+WHAT WAS BUILT
+==============================================================================
+
+Continuation of d36's full-unfreeze strategy. D36 achieved the first major
+breakthrough (3427 reward, 15 laps, 23.60 m/s, 3 pits) by unfreezing all
+36,874 parameters and using W_pit[128]=-30 as a gradient anchor.
+
+Training ep_rew_mean at the end of d36 was ~2260 (out of ~2590 final ep_rew in
+random-start training), suggesting the policy had not fully converged. D37 trains
+2M more steps from d36 with a fresh cosine LR schedule (1e-4 → 1e-6), hoping to:
+  1. Close the speed gap vs cv2 (23.60 → 26.92 m/s)
+  2. Reach 16-17 laps in fixed-start evaluation
+  3. Improve driving robustness (fewer random-start crashes)
+
+STARTING POINT: ppo_pit_v4_d36.zip
+SAVES TO:       rl/ppo_pit_v4_d37.zip
+LOGS TO:        runs/ppo_pit_v4_d37/
+
+==============================================================================
+TRAINING DETAILS
+==============================================================================
+
+Script: rl/train_ppo_pit_v4_d37.py
+  - Load d36 checkpoint
+  - Fresh cosine LR schedule: 1e-4 → 1e-6 over 2M steps
+  - All 36,874 params trainable (same full-unfreeze approach as d36)
+  - reset_num_timesteps=True (fresh LR schedule from start)
+
+EARLY TRAINING (first 5 iterations, iter_size=2048 steps):
+  Iter 1: ep_rew=4150  ← immediately near cv2's 4531!
+  Iter 2: ep_rew=4310
+  Iter 3: ep_rew=4360  ← peak early performance
+  Iter 4: ep_rew=4270
+  Iter 5: ep_rew=4180
+
+  These early numbers are impressive but misleading — the policy hadn't yet
+  been reshaped by the new gradient budget. Large LR early means high variance.
+
+FINAL TRAINING:
+  Final iter (~977/977): ep_rew≈2590, ep_len≈1270
+  (d36 final: ep_rew≈2260, ep_len≈1200)
+  Improvement: +14.6% ep_rew_mean, +5.8% ep_len
+
+POST-TRAINING WEIGHT DIAGNOSTICS:
+                            D37           D36          Change
+  policy_net[0] abs_mean:  0.070232    0.066465     +5.7%
+  policy_net[2] abs_mean:  0.021222    0.021355     -0.6%
+  action_net[0,:] (thr):   0.052805    0.061500     -14.1%  (smoother throttle)
+  action_net[1,:] (str):   0.021340    0.023231     -8.1%   (smoother steer)
+  W_pit[128]:             -30.0756    -30.0205     UNCHANGED ✓
+  b_pit:                  +17.9721    +17.9965     UNCHANGED ✓
+  Effective threshold:    tl ≈ 0.598  tl ≈ 0.599  STABLE ✓
+  log_std:          [-1.71, -2.93, -0.34]  (d36: [-0.26, -0.57, -0.17])
+
+Key observation: throttle and steer action magnitudes DECREASED (-14%, -8%),
+explaining the improved lateral error. The policy became smoother/more precise
+rather than faster. log_std for throttle/steer became much more negative (lower
+exploration std): steer std = exp(-2.93) = 0.053 vs d36's exp(-0.57) = 0.565.
+This is a policy that has converged to precise, low-variance actions.
+
+==============================================================================
+RESULTS
+==============================================================================
+
+FIXED START (N=10, deterministic):
+  D37: reward=3476.95, laps=15, speed=23.67 m/s, lateral=0.319 m, pits=3
+  D36: reward=3426.68, laps=15, speed=23.60 m/s, lateral=0.456 m, pits=3
+  cv2: reward=4531.7,  laps=17, speed=26.92 m/s, lateral=0.678 m, pits=0
+
+  Improvements vs D36:
+    Reward:        +50.27 (+1.5%)
+    Speed:         +0.07 m/s (+0.3%)  ← essentially unchanged
+    Lateral error: -0.137 m (-30%)    ← significant precision gain
+    Laps:          unchanged (15)
+    Pit stops:     unchanged (3)
+
+  Gap vs curriculum v2:
+    Reward:  -1054.75 (d37 = 76.7% of cv2)
+    Laps:    -2 (15 vs 17)
+    Speed:   -3.25 m/s (23.67 vs 26.92)
+    Note:    cv2 has NO pit overhead (0 pits), d37 has 3 pits × (-200) = -600
+
+RANDOM START (N=20, visible in evaluate output):
+  D37 not separately run for random start (evaluate.py runs fixed start).
+  Expected similar improvement pattern to d36: higher per-episode reward but
+  some crashes at random starts (same as d36's ~50% completion).
+
+==============================================================================
+ANALYSIS
+==============================================================================
+
+WHY SAME LAPS (15) BUT LOWER LATERAL ERROR?
+
+The additional 2M steps from d36 caused the policy to:
+  1. Reduce action magnitudes (smoother throttle/steer outputs)
+  2. Collapse log_std to very low values (much less exploration)
+  3. Achieve lower lateral error (0.319 vs 0.456 m, -30%)
+  4. NOT increase lap count or speed
+
+This pattern suggests the policy has converged to a local optimum at 15 laps.
+The 17-lap barrier of cv2 requires driving at 26.92 m/s — substantially faster.
+d37's driving speed is 23.67 m/s — only +0.07 from d36. The additional training
+budget was spent on precision (lower lateral error) rather than speed.
+
+WHY DID SPEED NOT IMPROVE?
+
+At 15 laps with 3 pit stops, the race structure is:
+  - Stint 1: laps 1-5 (fresh tyres, high grip, fast)
+  - Pit 1 at ~step 643
+  - Stint 2: laps 6-10 (fresh tyres again)
+  - Pit 2 at ~step 1314
+  - Stint 3: laps 11-15 (fast again after fresh tyres)
+
+The pit penalty (-200 × 3 = -600) limits the reward ceiling. To beat cv2
+(4531, no pits), d37 would need to achieve ~4531 + 600 = 5131 gross speed reward
+without pits — requiring substantially faster driving. The current policy is
+stable but stuck at the same speed profile as d36.
+
+WHY IS LOG_STD SO LOW?
+
+log_std = [-1.71, -2.93, -0.34] → std = [0.18, 0.053, 0.71]
+Compared to d36: [-0.26, -0.57, -0.17] → std = [0.77, 0.57, 0.84]
+
+The steer std collapsed from 0.57 to 0.053 — nearly deterministic steering.
+This means the policy has learned highly precise (but narrow) steering behavior.
+Low std is consistent with converged, specialized behavior. This also explains
+why lap count didn't increase — the policy is too "rigid" to explore new lines.
+
+WHAT CAN BREAK THE 15-LAP CEILING?
+
+The 15→16 lap barrier likely requires:
+  1. Training from scratch with a faster driving target (not possible without reset)
+  2. Entropy regularization to prevent log_std collapse (ent_coef > 0 in future runs)
+  3. Longer training (D38, 4M total) — but diminishing returns likely
+
+The 3-pit strategy with 23.67 m/s speed gives 3476 reward. cv2 with 0 pits at
+26.92 m/s gives 4531. The pit overhead (600) + speed gap (3.25 m/s × 2000 steps)
+is the fundamental barrier. Closing it requires faster driving, not more pits.
+
+==============================================================================
+WHAT'S NEXT (OPTIONS)
+==============================================================================
+
+Option 1: D38 — Continue training (2M more steps from d37)
+  Pro: Cheap, might push to 16 laps
+  Con: log_std collapsed → low entropy → unlikely to escape local optimum
+  Risk: Overfitting to fixed-start trajectory, worse random-start performance
+
+Option 2: D38 — Entropy-boosted training (ent_coef=0.01 from d37)
+  Pro: Restores exploration, might find faster lines
+  Con: Could destabilize the 3-pit structure or driving quality
+  Risk: Regression in reward
+
+Option 3: Accept d37 as project best for pit strategy
+  D37: 3477 reward, 15 laps, 23.67 m/s, 3 pits, 100% completion
+  cv2 is still the speed champion (4531, 17 laps, 26.92 m/s, no pits)
+  D37 is the best pit strategy demonstrating the tyre management advantage
+
+Option 4: Final benchmark (N=100 fixed start, N=100 random start)
+  For a clean final result before project conclusion
+
+==============================================================================
+EVALUATION TABLE (fixed start, N=10)
+==============================================================================
+
+Policy                    Reward   Laps  Speed   Lateral  Pits
+PPO Curriculum v2 (3M)    4531.7    17   26.92   0.678      0
+PPO Pit v4 D37 (d37)      3476.9    15   23.67   0.319      3  ← BEST PIT
+PPO Pit v4 D36 (d36)      3426.7    15   23.60   0.456      3
+PPO Pit v4 D34 (d34)      2688.5    11   17.69   1.157      1
+PPO Pit v4 D35 (d35)      2688.2    11   17.69   1.158      1
+PPO Pit v4 D33 (d33)      2683.8    11   17.68   1.167      1
+PPO Pit v4 D32 (d32)      2683.8    11   17.68   1.167      1
+Expert (rule-based)        2909.1    11   17.10   0.797      0
+PPO Pit v4 D29 (d29)      1885.3     7   17.62   1.134      0
