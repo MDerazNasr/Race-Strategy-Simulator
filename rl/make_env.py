@@ -151,6 +151,33 @@ def make_env_pit_d30():
     return env
 
 
+def make_env_multi_agent():
+    """
+    Creates a multi-agent environment instance for SB3 (D39).
+
+    WHAT'S DIFFERENT vs make_env():
+      - F1MultiAgentEnv: ego PPO vs ExpertDriver opponent (max_speed=22 m/s).
+      - Observation is 13D: [11D standard ego obs] + [track_gap] + [opp_speed_norm].
+      - Action space is 2D (same as make_env): no pit signal.
+      - Additional reward terms:
+          position_bonus   = +0.5/step when ego is ahead (track_gap < 0)
+          overtake_bonus   = +200 one-time when ego overtakes opponent
+          collision_penalty= -0.5/step when distance < 3m
+      - No tyre degradation (focus is on race strategy vs opponent).
+
+    TRAINING NOTE:
+      Load ppo_curriculum_v2 (11D) and extend to 13D using extend_obs_dim(model, 11, 13).
+      After extend_obs_dim, fix obs dim 11 bounds to [-1, 1] for track_gap.
+      Use ent_coef=0.01 from the start to prevent log_std collapse (lesson from d38).
+
+    Used in: rl/train_ppo_multi_agent_d39.py (d39)
+    """
+    from env.f1_multi_env import F1MultiAgentEnv
+    env = F1MultiAgentEnv()
+    env = Monitor(env)
+    return env
+
+
 def make_env_pit_d23():
     """
     Creates a pit-stop environment with pit timing reward shaping (Week 5 / d23).
