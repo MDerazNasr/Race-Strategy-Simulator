@@ -1379,3 +1379,31 @@ during full unfreeze. PPO improved driving speed (+33%), track precision (-61% e
 and naturally learned 3 pit stops as faster driving depletes tyres faster.
 
 NEXT: d37 — Train d36 longer (4M more steps) to close speed gap vs curriculum v2.
+
+==============================================================================
+D39: Multi-Agent Racing (2026-03-05)
+==============================================================================
+
+NEW DIRECTION: ego PPO vs ExpertDriver opponent (max_speed=22 m/s)
+New env: F1MultiAgentEnv (env/f1_multi_env.py), 13D obs, 2D action
+New rewards: position_bonus(+0.5/step ahead) + overtake_bonus(+200) + collision_penalty(-0.5)
+
+Training: extend cv2 (11D→13D), ent_coef=0.01, cosine LR 1e-4→1e-6, 3M steps
+Runtime: 1542s
+
+Results fixed start (N=10, deterministic):
+  reward=6024.8, laps=17, speed=26.91 m/s, ahead=49.5%, overtakes=5, completion=100%
+
+Results random start (N=20, deterministic):
+  reward=3314.4 +/-2962.6, laps=9.2, speed=17.11 m/s, ahead=28.8%, overtakes=3.0, completion=55%
+
+Key finding: track_gap/opp_speed columns learned ZERO weight — agent relies entirely
+on speed advantage from cv2 (26.91 m/s > opponent 22 m/s). No strategic positioning.
+Base driving quality fully preserved: 17 laps, 26.91 m/s = identical to cv2.
+5 overtakes per fixed-start episode = ego lapping opponent ~5 times from speed advantage.
+
+Log_std maintained: throttle 0.186→0.280, steer 0.063→0.085 (ent_coef=0.01 worked\!)
+
+Limitation: opponent must be FASTER than ego (>28 m/s) to force strategic behavior.
+
+NEXT: Option A (opponent at 28+ m/s) OR Option B (safety car/weather).

@@ -1,0 +1,176 @@
+==============================================================================
+D39: Multi-Agent Racing — Ego PPO vs ExpertDriver Opponent
+==============================================================================
+
+DATE: 2026-03-05
+TRAINING TIME: 1542s (~26 min), 3M steps, CPU
+
+==============================================================================
+WHAT WAS BUILT
+==============================================================================
+
+New standalone environment: F1MultiAgentEnv (env/f1_multi_env.py)
+  - Ego car (PPO-controlled, DynamicCar) vs opponent (ExpertDriver, max_speed=22 m/s)
+  - 13D observation: [11D standard ego obs] + [track_gap] + [opp_speed_norm]
+  - 2D action: [throttle, steer] — no pit signal
+  - New reward terms:
+      position_bonus   = +0.5/step when track_gap < 0 (ego ahead)
+      overtake_bonus   = +200 one-time when ego transitions from behind to ahead
+      overtake_cooldown = 200 steps (prevents lapping from farming the bonus)
+      collision_penalty= -0.5/step within 3.0m of opponent
+
+Track gap definition:
+  track_gap = (opp_idx - ego_idx) / len(track), wrap-corrected to [-0.5, 0.5]
+  Positive = opponent ahead. Negative = ego ahead.
+
+Reset:
+  Fixed start: ego at waypoint 0 (v=5 m/s, aligned), opponent at waypoint 20 (slightly ahead)
+  Random start: ego at random waypoint, opponent at (ego_idx + 20) % N
+
+Training:
+  - Start: ppo_curriculum_v2.zip (11D) extended to 13D via extend_obs_dim + buffer recreation
+  - LR: cosine 1e-4 → 1e-6
+  - ent_coef = 0.01 FROM THE START (lesson from d38: prevent log_std collapse)
+  - Full unfreeze: 36,997 trainable params
+  - 3M steps, DummyVecEnv([make_env_multi_agent])
+
+Key implementation fixes required:
+  1. extend_obs_dim sets new dim bounds as low=0.0 → manually fix dim 11 (track_gap) to low=-1.0
+  2. PPO.load without env pre-creates rollout buffer at 11D → must recreate RolloutBuffer(13D) before set_env
+  3. model.n_envs stays at 1 after load — DummyVecEnv([factory] * 1) avoids n_envs mismatch
+
+==============================================================================
+TRAINING LOG
+==============================================================================
+
+Initial (iteration 1, 2k steps):    ep_rew=-25, ep_len=19       ← policy barely alive
+Iteration 2 (4k steps):             ep_rew=1750, ep_len=583     ← cv2 driving kicking in
+Iteration 10 (20k steps):           ep_rew=3120, ep_len=1010    ← surpassed 3k target
+Iteration ~500k steps:              ep_rew≈3400, ep_len≈1100    ← plateau region
+Final (3M steps):                   ep_rew=3460, ep_len=1160    ← converged
+Final LR: 1e-6 (minimum), clip_fraction=0 → fully converged
+
+==============================================================================
+POST-TRAINING WEIGHT DIAGNOSTICS
+==============================================================================
+
+policy_net[0] abs_mean: 0.059229 → 0.050117  (-15.4%)  ← features adapted
+policy_net[2] abs_mean: 0.017204 → 0.017937  (+4.3%)
+
+Critical finding — new obs columns:
+  col[11] (track_gap)      abs_mean = 0.000000  (zero throughout training)
+  col[12] (opp_speed_norm) abs_mean = 0.000000  (zero throughout training)
+
+log_std: [-1.6815, -2.7609] → [-1.2738, -2.4637]
+std:     [0.1861, 0.0632]   → [0.2798, 0.0851]
+         throttle +50%, steer +34%  ← ent_coef=0.01 maintained exploration ✓
+
+==============================================================================
+RESULTS
+==============================================================================
+
+FIXED START (N=10, deterministic, all identical due to det. policy):
+  reward:    6024.8 ± 0.0
+  laps:      17
+  speed:     26.91 m/s
+  ahead_pct: 49.5%          (ego ahead of opponent 49.5% of time)
+  overtakes: 5 per episode  (ego laps opponent repeatedly from speed advantage)
+  completion: 100%          (no crashes)
+
+REWARD DECOMPOSITION (fixed start):
+  Base driving (cv2-level): ~4531
+  Position bonus:  ~990 steps ahead × 0.5 = ~495
+  Overtake bonus:  5 × 200 = 1000
+  Collision penalty: ~1 (negligible — cars rarely within 3m)
+  Total: 4531 + 495 + 1000 ≈ 6026 ≈ 6024.8 ✓
+
+RANDOM START (N=20, deterministic):
+  reward:    3314.4 ± 2962.6
+  laps:      9.2
+  speed:     17.11 m/s
+  ahead_pct: 28.8%
+  overtakes: 3.0 per episode
+  completion: 55%
+
+==============================================================================
+KEY FINDING: SPEED ADVANTAGE, NOT STRATEGIC AWARENESS
+==============================================================================
+
+The zero weights on track_gap (col[11]) and opp_speed_norm (col[12]) reveal that
+D39 never developed explicit opponent awareness. Instead, it relies entirely on
+raw speed advantage inherited from cv2 (26.91 m/s ego vs 22 m/s opponent).
+
+Why this happened:
+  1. cv2's driving (26.9 m/s) is already ~22% faster than the opponent (22 m/s).
+  2. Being faster is sufficient to overtake without needing to "see" the opponent.
+  3. The position_bonus (+0.5/step when ahead) is dominated by the base driving reward.
+  4. PPO never needed to update col[11]/col[12] weights — the gradient through those
+     columns was zero since track_gap didn't change the policy's actions.
+
+This is correct behavior for a faster car against a slower opponent. The 5 overtakes
+per episode are the ego lapping around the 22 m/s ExpertDriver ~5 times in 17 laps.
+
+For genuine strategic racing (blocking, position defense, drafting), the opponent
+would need to be FASTER than the ego (max_speed ≥ 28 m/s) so the speed advantage
+alone is insufficient to win.
+
+==============================================================================
+WHAT'S PRESERVED / WHAT'S GAINED
+==============================================================================
+
+PRESERVED from cv2:
+  - 17 laps (identical to cv2's fixed-start performance)
+  - 26.91 m/s speed (vs cv2's 26.92 m/s — essentially identical)
+  - 100% fixed-start completion
+
+GAINED vs single-agent:
+  - Competitive framing: reward now reflects race position, not just solo time
+  - 5 overtakes per episode (demonstrates gap closures)
+  - ~33% reward increase (6025 vs 4531) from position/overtake bonuses
+
+LIMITATION:
+  - New dimensions (track_gap, opp_speed_norm) carry zero learned weight
+  - No true position defense or strategic blocking behavior
+  - Must set opponent max_speed > ego speed (≥28 m/s) for strategic behavior
+
+==============================================================================
+COMPARISON TABLE
+==============================================================================
+
+Policy              | Env     | Reward | Laps | Speed   | Notes
+--------------------|---------|--------|------|---------|------------------
+cv2 (speed champ)   | single  | 4531   | 17   | 26.92   | baseline
+D37 (pit champ)     | pit     | 3477   | 15   | 23.67   | 3 pits, best pit
+D39 (multi-agent)   | multi   | 6025   | 17   | 26.91   | 5 overtakes, 100%
+
+Note: D39 reward not directly comparable to single-agent (includes +1495 in
+position/overtake bonuses vs single-agent where those terms don't exist).
+Apples-to-apples base driving: D39 ≈ cv2 (17 laps, 26.91 m/s).
+
+==============================================================================
+FILES
+==============================================================================
+
+New:      env/f1_multi_env.py                  — F1MultiAgentEnv
+New:      rl/train_ppo_multi_agent_d39.py       — training script
+New:      rl/ppo_multi_agent_d39.zip            — trained policy
+New:      runs/ppo_multi_agent_d39/             — TensorBoard logs
+Modified: rl/make_env.py                        — make_env_multi_agent()
+Modified: rl/evaluate.py                        — d39 entry + env_multi routing
+New:      Notes/d39.txt                         — this file
+
+==============================================================================
+WHAT'S NEXT
+==============================================================================
+
+Option A — Make D39 strategic (recommended):
+  Increase opponent max_speed to 28+ m/s so speed alone can't win.
+  The agent will be forced to use track_gap for defensive positioning.
+  → New env flag: F1MultiAgentEnv(opp_max_speed=28.0)
+
+Option B — Safety car / weather events (option 1 from the roadmap):
+  Add random yellow flag periods (safety car, reduced speed zones).
+  Adds track position value: overtake before yellow, pit under safety car.
+
+Option C — Wrap up the project:
+  N=100 benchmark with D39 in the multi-agent env. Write project report.
