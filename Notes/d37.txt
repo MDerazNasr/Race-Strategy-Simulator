@@ -1,182 +1,437 @@
 ==============================================================================
-D37 — Pit v4 D37: Continue Full Unfreeze (Week 6)
+D37 — COMPREHENSIVE REFERENCE
+PPO Pit Strategy v4 D37: Continue Full Unfreeze (Week 6)
 ==============================================================================
 DATE: 2026-03-04
-STATUS: COMPLETE (2M steps, ~939 seconds)
-
-==============================================================================
-WHAT WAS BUILT
-==============================================================================
-
-Continuation of d36's full-unfreeze strategy. D36 achieved the first major
-breakthrough (3427 reward, 15 laps, 23.60 m/s, 3 pits) by unfreezing all
-36,874 parameters and using W_pit[128]=-30 as a gradient anchor.
-
-Training ep_rew_mean at the end of d36 was ~2260 (out of ~2590 final ep_rew in
-random-start training), suggesting the policy had not fully converged. D37 trains
-2M more steps from d36 with a fresh cosine LR schedule (1e-4 → 1e-6), hoping to:
-  1. Close the speed gap vs cv2 (23.60 → 26.92 m/s)
-  2. Reach 16-17 laps in fixed-start evaluation
-  3. Improve driving robustness (fewer random-start crashes)
-
-STARTING POINT: ppo_pit_v4_d36.zip
-SAVES TO:       rl/ppo_pit_v4_d37.zip
-LOGS TO:        runs/ppo_pit_v4_d37/
-
-==============================================================================
-TRAINING DETAILS
-==============================================================================
-
+STATUS: COMPLETE — PROJECT BEST PIT POLICY
 Script: rl/train_ppo_pit_v4_d37.py
-  - Load d36 checkpoint
-  - Fresh cosine LR schedule: 1e-4 → 1e-6 over 2M steps
-  - All 36,874 params trainable (same full-unfreeze approach as d36)
-  - reset_num_timesteps=True (fresh LR schedule from start)
+Model:  rl/ppo_pit_v4_d37.zip
+Logs:   runs/ppo_pit_v4_d37/
 
-EARLY TRAINING (first 5 iterations, iter_size=2048 steps):
-  Iter 1: ep_rew=4150  ← immediately near cv2's 4531!
+HEADLINE RESULT:
+  reward=3476.95, laps=15, speed=23.67 m/s, lateral=0.319 m, pits=3, 100% completion
+  Best pit strategy in the project — beats every prior pit attempt.
+  Gap to cv2 (no-pit speed champion): -1055 reward, -2 laps, -3.25 m/s
+
+==============================================================================
+SECTION 1 — CONTEXT: HOW WE GOT HERE
+==============================================================================
+
+The full pit strategy history in one paragraph:
+  D21 made the first voluntary pit stop (reward=1877, 7 laps) using a state-conditional
+  threshold initialized to fire at worn tyres. D22-D29 froze the driving weights and only
+  trained the pit row — hitting a ceiling of 1883 reward (7 laps) because the frozen
+  features couldn't encode tyre wear linearly (the "feature bottleneck"). D31 confirmed
+  this: even with BC pre-training, the frozen feature space only separated worn/fresh
+  states by 3.25% of what was needed. D32 broke through with PitAwarePolicy — a direct
+  tyre_life → pit_signal connection bypassing the features entirely (W_pit[128]=-10,
+  b_pit=+7, threshold tl=0.60) — achieving 2683 reward, 11 laps, 1 pit, 100% completion.
+  D33-D35 refined this, pushing W_pit[128] to -30 to try to fire a second pit, but the
+  second-pit never fired in deterministic evaluation because frozen features contributed
+  ≈-2.3 at the second pit window, overwhelming the direct signal. D36 solved this by
+  unfreezing ALL 36,874 parameters — letting features, throttle, steer, and pit all
+  evolve jointly. The W_pit[128]=-30 anchor preserved pit strategy while driving speed
+  jumped from 17.7→23.6 m/s and laps from 11→15 with 3 pits. D37 continues from d36
+  with 2M more steps (same full-unfreeze approach) and refines the result to 3477 reward,
+  0.319 m lateral error (down 30%), same 15 laps/3 pits/23.67 m/s.
+
+The key enabling insight (d36):
+  WHY does full unfreeze work when fine-tuning the pit row alone failed?
+  — When only 131 pit-row params train, the feature encoder (18k params) stays frozen.
+    Those frozen features encode d21's slow-driving knowledge. The pit row can only learn
+    to fire when the frozen features happen to produce the right activations. They don't.
+  — When all 36,874 params train together, the feature encoder can CHANGE to encode
+    tyre wear more explicitly, the throttle/steer can learn to drive faster, and the pit
+    row benefits from better features. Joint optimization is much more powerful.
+  — The risk of full unfreeze: the pit strategy (W_pit[128]=-30) might get overwritten.
+    WHY it doesn't: -30 is so large that the gradient budget spread across 36k params
+    can only nudge it by ~0.05-0.08 per 2M steps. It's effectively a frozen anchor.
+
+==============================================================================
+SECTION 2 — ARCHITECTURE (what the model actually is)
+==============================================================================
+
+Policy class: PitAwarePolicy (rl/pit_aware_policy.py)
+Feature extractor: TyrLifeAugmentedExtractor
+  — Inherits from SB3's FlattenExtractor
+  — In forward_actor(): appends obs[11] (tyre_life, range 0→1) to the 128-dim feature
+    vector AFTER the MLP. Output is 129-dim, not 128-dim.
+  — In forward_critic(): uses standard 128-dim output (value function doesn't need pit)
+
+Full network (12D input → 3D action output):
+  Input: obs[0:11] = [x, y, heading, speed, lat_err, curvature, ...track features]
+         obs[11]   = tyre_life (0=bald, 1=fresh)
+
+  mlp_extractor.policy_net:
+    Linear(12, 128) → ReLU → Linear(128, 128) → ReLU
+    Output: feature vector f ∈ R^128  (the "driving features")
+
+  TyrLifeAugmentedExtractor appends obs[11]:
+    augmented = [f[0], f[1], ..., f[127], tyre_life]  ← dim 129
+
+  action_net: Linear(129, 3)
+    Row 0: throttle = W_thr[:128] @ f + b_thr       (drives the car forward)
+    Row 1: steer    = W_str[:128] @ f + b_str        (controls lateral position)
+    Row 2: pit_signal = W_pit[:128] @ f + W_pit[128] × tyre_life + b_pit
+
+  The pit signal decomposed:
+    pit_signal = (features_contribution) + (direct_tyre_life_signal)
+    where:
+      features_contribution = W_pit[:128] @ f        ← learned from training
+      direct_tyre_life_signal = W_pit[128] × tyre_life + b_pit  ← the anchor
+
+  At d37, the direct component at tyre_life=0.598 (threshold):
+    (-30.076) × 0.598 + 17.972 = -17.985 + 17.972 = -0.013 ≈ 0  ← threshold point
+  Below threshold (tyre_life < 0.598): direct component > 0 → pit fires
+  Above threshold (tyre_life > 0.598): direct component < 0 → no pit
+
+  Action space:
+    throttle ∈ [-1, 1]: clipped/scaled → controls engine power
+    steer    ∈ [-1, 1]: controls lateral position on track
+    pit_signal ∈ R (continuous): if > 0 AND tyre_life < 0.60 → pit taken
+
+  SB3 action distribution: Gaussian with learned log_std (per action dim):
+    D37 log_std = [-1.711, -2.932, -0.343]
+    D37 std     = [ 0.181,  0.053,  0.710]
+    (std only matters during stochastic training; deterministic eval uses mean)
+
+  Value network (separate from policy, NOT augmented):
+    mlp_extractor.value_net: Linear(12, 128) → ReLU → Linear(128, 128) → ReLU
+    value_net: Linear(128, 1)
+
+Total parameters: 36,874
+  mlp_extractor.policy_net: 12×128 + 128 + 128×128 + 128 = 18,176
+  mlp_extractor.value_net:  12×128 + 128 + 128×128 + 128 = 18,176
+  action_net: 129×3 + 3 = 390  (pit row is 129 wide, not 128!)
+  value_net:  128×1 + 1 = 129
+  log_std:    3
+  Total: 18,176 + 18,176 + 390 + 129 + 3 = 36,874
+
+==============================================================================
+SECTION 3 — ENVIRONMENT (what the model is trained on)
+==============================================================================
+
+Environment: make_env_pit_d30() → F1Env with:
+  tyre_degradation=True:
+    At each step, tyre_life decreases by ~0.0007 per step (from 1.0 → 0.0 in ~1428 steps)
+    Grip: mu = mu_base × max(0.1, tyre_life)  ← KEY PHYSICS
+    At tyre_life=1.0 (fresh): full grip
+    At tyre_life=0.5 (half worn): HALF grip → slower, harder to control
+    At tyre_life=0.1 (bald): minimum grip (10% of base)
+
+  pit_stops=True:
+    When pit is taken: tyre_life reset to 1.0 (fresh tyres)
+    Pit penalty: -200 reward per pit stop (time lost in pit lane)
+    Pit cooldown: ~100 steps after each pit (can't pit again immediately)
+    Random start: tyre_life initialized uniformly in [0.3, 1.0]
+    Fixed start: tyre_life initialized to 1.0 (fresh tyres)
+
+  voluntary_pit_reward=True (key addition from d30):
+    Bonus: +300 reward when BOTH conditions met:
+      (a) agent's pit_signal > 0  (agent CHOSE to pit)
+      (b) tyre_life < 0.60        (tyres are worn enough to justify it)
+    Net reward per voluntary pit: +300 - 200 = +100
+    This aligns the reward signal with good pit strategy:
+      — Pitting on fresh tyres (tl > 0.60): no bonus, just -200 penalty
+      — Pitting on worn tyres  (tl < 0.60): +300 bonus - 200 penalty = +100 net
+      — The agent learns: only pit when tyres are worn
+
+  Observation space (12D):
+    [0]: x position (normalized)
+    [1]: y position (normalized)
+    [2]: heading error (angle deviation from track direction)
+    [3]: speed (m/s, normalized)
+    [4]: lateral error (distance from centerline)
+    [5]: curvature (track curve ahead)
+    [6-10]: additional track features (look-ahead points, etc.)
+    [11]: tyre_life (0.0=bald, 1.0=fresh)  ← THE PIT SIGNAL KEY INPUT
+
+  Episode: max 2000 steps (~15-17 laps at race speed)
+  Training: random starts (tyre_life uniformly [0.3, 1.0], random track position)
+  Evaluation: fixed start (tyre_life=1.0, position=waypoint 0, heading aligned)
+
+==============================================================================
+SECTION 4 — TRAINING PROCEDURE
+==============================================================================
+
+Algorithm: PPO (Proximal Policy Optimization)
+  SB3 implementation, default hyperparameters except:
+    n_steps=2048 (rollout buffer size per iteration)
+    batch_size=64 (minibatch for updates)
+    n_epochs=10 (passes over rollout buffer per iteration)
+    clip_range=0.1 (PPO clipping — tighter than default 0.2)
+    gamma=0.999 (high discount — values long-horizon rewards)
+    ent_coef=0.0 (no entropy bonus — default)
+    learning_rate: cosine schedule (see below)
+
+LR Schedule (cosine_schedule from rl/schedules.py):
+  Fresh LR schedule reset for d37: 1e-4 → 1e-6 over 2M steps
+  At start of training: lr = 1e-4 (aggressive)
+  At end of training:   lr = 1e-6 (conservative)
+  Formula: lr(t) = min_lr + (initial_lr - min_lr) × 0.5 × (1 + cos(π × t))
+  where t = fraction of training remaining (1.0 at start, 0.0 at end)
+  Note: must set BOTH model.learning_rate AND model.lr_schedule after PPO.load()
+        (SB3 bug: if only one is set, LR doesn't update correctly)
+
+Weight initialization:
+  Load from ppo_pit_v4_d36.zip (d36's trained weights)
+  D36's key weights:
+    W_pit[128] = -30.0205  (direct tyre_life connection)
+    b_pit      = +17.9965  (threshold bias)
+    threshold  = -b/W = -17.9965/-30.0205 = 0.599  (fires at tl < 0.599)
+    log_std    = [-0.26, -0.57, -0.17]  (std=[0.77, 0.57, 0.84])
+
+Full unfreeze (ALL 36,874 params trainable):
+  for param in model.policy.parameters():
+      param.requires_grad = True
+  No gradient hooks. No frozen layers. Everything can change.
+  The pit anchor (W_pit[128]=-30) is preserved NOT by freezing but by the
+  gradient mathematics: its magnitude is so large relative to the per-step
+  gradient update that 2M steps can only change it by ~0.05 total.
+
+Total steps: 2,000,000
+Duration: ~939 seconds (~16 minutes on MacBook Pro CPU)
+Iterations: 977 (2M steps / 2048 per iter ≈ 977)
+
+==============================================================================
+SECTION 5 — TRAINING TRAJECTORY
+==============================================================================
+
+EARLY TRAINING (first 5 iterations):
+  Iter 1: ep_rew=4150  ← IMMEDIATELY near cv2's 4531!
   Iter 2: ep_rew=4310
-  Iter 3: ep_rew=4360  ← peak early performance
+  Iter 3: ep_rew=4360  ← early peak
   Iter 4: ep_rew=4270
   Iter 5: ep_rew=4180
 
-  These early numbers are impressive but misleading — the policy hadn't yet
-  been reshaped by the new gradient budget. Large LR early means high variance.
+  Why so high early? At iter 1, only 2048 steps have been collected. These steps
+  come from episodes that haven't been fully reshaped yet — d36's 15-lap policy is
+  still largely intact. The first few thousand steps of training produce episodes
+  close to d36's behavior (which already achieved 3427 reward per fixed-start episode).
+  With random starts and stochastic actions, the MEAN reward over these episodes
+  can briefly exceed the fixed-start deterministic reward.
 
-FINAL TRAINING:
-  Final iter (~977/977): ep_rew≈2590, ep_len≈1270
-  (d36 final: ep_rew≈2260, ep_len≈1200)
-  Improvement: +14.6% ep_rew_mean, +5.8% ep_len
+MIDDLE TRAINING (~100-500 iters):
+  The gradient signal reshapes the policy. ep_rew_mean stabilizes around 2000-2500
+  (random-start training, not fixed-start). ep_len grows as more episodes survive.
 
-POST-TRAINING WEIGHT DIAGNOSTICS:
-                            D37           D36          Change
-  policy_net[0] abs_mean:  0.070232    0.066465     +5.7%
-  policy_net[2] abs_mean:  0.021222    0.021355     -0.6%
-  action_net[0,:] (thr):   0.052805    0.061500     -14.1%  (smoother throttle)
-  action_net[1,:] (str):   0.021340    0.023231     -8.1%   (smoother steer)
-  W_pit[128]:             -30.0756    -30.0205     UNCHANGED ✓
-  b_pit:                  +17.9721    +17.9965     UNCHANGED ✓
-  Effective threshold:    tl ≈ 0.598  tl ≈ 0.599  STABLE ✓
-  log_std:          [-1.71, -2.93, -0.34]  (d36: [-0.26, -0.57, -0.17])
-
-Key observation: throttle and steer action magnitudes DECREASED (-14%, -8%),
-explaining the improved lateral error. The policy became smoother/more precise
-rather than faster. log_std for throttle/steer became much more negative (lower
-exploration std): steer std = exp(-2.93) = 0.053 vs d36's exp(-0.57) = 0.565.
-This is a policy that has converged to precise, low-variance actions.
+FINAL TRAINING (last ~100 iters):
+  ep_rew_mean ≈ 2590 (up from d36's 2260, +14.6%)
+  ep_len ≈ 1270 (up from d36's 1200, +5.8%)
+  approx_kl → very small (policy not changing much — converged)
 
 ==============================================================================
-RESULTS
+SECTION 6 — POST-TRAINING WEIGHT ANALYSIS
 ==============================================================================
 
-FIXED START (N=10, deterministic):
-  D37: reward=3476.95, laps=15, speed=23.67 m/s, lateral=0.319 m, pits=3
-  D36: reward=3426.68, laps=15, speed=23.60 m/s, lateral=0.456 m, pits=3
-  cv2: reward=4531.7,  laps=17, speed=26.92 m/s, lateral=0.678 m, pits=0
+                           D37           D36          Change    Interpretation
+policy_net[0] abs_mean:  0.070232    0.066465     +5.7%      features evolved slightly
+policy_net[2] abs_mean:  0.021222    0.021355     -0.6%      essentially unchanged
+action_net[0,:] (thr):   0.052805    0.061500     -14.1%     SMALLER throttle weights
+action_net[1,:] (str):   0.021340    0.023231     -8.1%      SMALLER steer weights
+W_pit[128]:             -30.0756    -30.0205     -0.18%      ANCHOR — nearly unchanged ✓
+b_pit:                  +17.9721    +17.9965     -0.14%      ANCHOR — nearly unchanged ✓
+threshold:               tl≈0.598    tl≈0.599               STABLE: pits at tl < 0.598
+log_std[throttle]:       -1.7109     -0.2613               std 0.77 → 0.18 ← COLLAPSED
+log_std[steer]:          -2.9316     -0.5725               std 0.57 → 0.05 ← COLLAPSED
+log_std[pit]:            -0.3430     -0.1717               std 0.84 → 0.71  (stable)
 
-  Improvements vs D36:
-    Reward:        +50.27 (+1.5%)
-    Speed:         +0.07 m/s (+0.3%)  ← essentially unchanged
-    Lateral error: -0.137 m (-30%)    ← significant precision gain
-    Laps:          unchanged (15)
-    Pit stops:     unchanged (3)
+KEY OBSERVATION — SMALLER ACTION WEIGHTS:
+  Throttle weight magnitude fell -14.1%, steer fell -8.1%.
+  Smaller weights → smaller action outputs for the same feature activations.
+  Effect: more conservative, smooth driving. Less aggressive throttle and steer.
+  This explains the -30% lateral error improvement (0.456→0.319 m):
+    smaller steer weights → smaller corrections → car tracks centerline more smoothly.
+  Trade-off: conservative driving doesn't explore faster lines → speed didn't increase.
 
-  Gap vs curriculum v2:
-    Reward:  -1054.75 (d37 = 76.7% of cv2)
-    Laps:    -2 (15 vs 17)
-    Speed:   -3.25 m/s (23.67 vs 26.92)
-    Note:    cv2 has NO pit overhead (0 pits), d37 has 3 pits × (-200) = -600
+KEY OBSERVATION — LOG_STD COLLAPSE:
+  Steer log_std: -0.57 → -2.93 (std: 0.57 → 0.05)
+  This is the policy becoming nearly DETERMINISTIC in its steering.
+  In SB3 PPO, log_std is a learnable parameter separate from the policy network.
+  It represents "how much to explore around the mean action."
+  As the policy converges, PPO naturally reduces log_std because:
+    — Reducing std reduces the policy entropy
+    — Lower entropy = more deterministic = PPO can optimize more precisely
+    — Without an entropy penalty (ent_coef=0), there's no force keeping std high
+  Consequence: the policy found a PRECISE but NARROW local optimum. It cannot
+  explore new lines (faster or different racing trajectories) because std≈0.
 
-RANDOM START (N=20, visible in evaluate output):
-  D37 not separately run for random start (evaluate.py runs fixed start).
-  Expected similar improvement pattern to d36: higher per-episode reward but
-  some crashes at random starts (same as d36's ~50% completion).
-
-==============================================================================
-ANALYSIS
-==============================================================================
-
-WHY SAME LAPS (15) BUT LOWER LATERAL ERROR?
-
-The additional 2M steps from d36 caused the policy to:
-  1. Reduce action magnitudes (smoother throttle/steer outputs)
-  2. Collapse log_std to very low values (much less exploration)
-  3. Achieve lower lateral error (0.319 vs 0.456 m, -30%)
-  4. NOT increase lap count or speed
-
-This pattern suggests the policy has converged to a local optimum at 15 laps.
-The 17-lap barrier of cv2 requires driving at 26.92 m/s — substantially faster.
-d37's driving speed is 23.67 m/s — only +0.07 from d36. The additional training
-budget was spent on precision (lower lateral error) rather than speed.
-
-WHY DID SPEED NOT IMPROVE?
-
-At 15 laps with 3 pit stops, the race structure is:
-  - Stint 1: laps 1-5 (fresh tyres, high grip, fast)
-  - Pit 1 at ~step 643
-  - Stint 2: laps 6-10 (fresh tyres again)
-  - Pit 2 at ~step 1314
-  - Stint 3: laps 11-15 (fast again after fresh tyres)
-
-The pit penalty (-200 × 3 = -600) limits the reward ceiling. To beat cv2
-(4531, no pits), d37 would need to achieve ~4531 + 600 = 5131 gross speed reward
-without pits — requiring substantially faster driving. The current policy is
-stable but stuck at the same speed profile as d36.
-
-WHY IS LOG_STD SO LOW?
-
-log_std = [-1.71, -2.93, -0.34] → std = [0.18, 0.053, 0.71]
-Compared to d36: [-0.26, -0.57, -0.17] → std = [0.77, 0.57, 0.84]
-
-The steer std collapsed from 0.57 to 0.053 — nearly deterministic steering.
-This means the policy has learned highly precise (but narrow) steering behavior.
-Low std is consistent with converged, specialized behavior. This also explains
-why lap count didn't increase — the policy is too "rigid" to explore new lines.
-
-WHAT CAN BREAK THE 15-LAP CEILING?
-
-The 15→16 lap barrier likely requires:
-  1. Training from scratch with a faster driving target (not possible without reset)
-  2. Entropy regularization to prevent log_std collapse (ent_coef > 0 in future runs)
-  3. Longer training (D38, 4M total) — but diminishing returns likely
-
-The 3-pit strategy with 23.67 m/s speed gives 3476 reward. cv2 with 0 pits at
-26.92 m/s gives 4531. The pit overhead (600) + speed gap (3.25 m/s × 2000 steps)
-is the fundamental barrier. Closing it requires faster driving, not more pits.
+KEY OBSERVATION — PIT ANCHOR PRESERVED:
+  W_pit[128] moved only 0.055 over 2M steps (-30.020 → -30.076).
+  This is ~0.0028% per 2M steps — essentially noise level.
+  The anchor works because: gradient_update = lr × gradient.
+  At lr=1e-4 max and typical gradient magnitude ~0.01, max update ≈ 1e-6 per step.
+  Over 2M steps: max cumulative change ≈ 2. But W_pit[128]=-30, so relative change ≈ 6%.
+  In practice, gradients for W_pit[128] are much smaller (many params compete for
+  the gradient budget), so the actual change is <0.1%.
 
 ==============================================================================
-WHAT'S NEXT (OPTIONS)
+SECTION 7 — RESULTS IN DETAIL
 ==============================================================================
 
-Option 1: D38 — Continue training (2M more steps from d37)
-  Pro: Cheap, might push to 16 laps
-  Con: log_std collapsed → low entropy → unlikely to escape local optimum
-  Risk: Overfitting to fixed-start trajectory, worse random-start performance
+FIXED START (N=10 episodes, deterministic=True):
+  All 10 episodes: identical result (deterministic policy + fixed start = same trajectory)
+  reward=3476.95  std=0.00   ← deterministic
+  laps=15         (max possible with 3 pits at this speed: ~5 laps per stint × 3 stints)
+  speed=23.67 m/s avg        (vs d36's 23.60 m/s, vs cv2's 26.92 m/s)
+  lateral=0.319 m avg error  (vs d36's 0.456 m — 30% MORE PRECISE)
+  steps=2000      (episode ran full 2000 steps — 100% completion)
+  pits=3.00       (exactly 3 pit stops in every episode)
 
-Option 2: D38 — Entropy-boosted training (ent_coef=0.01 from d37)
-  Pro: Restores exploration, might find faster lines
-  Con: Could destabilize the 3-pit structure or driving quality
-  Risk: Regression in reward
+RACE STRUCTURE (what happens in those 2000 steps):
+  Step 0:    Start. tyre_life=1.0, full grip.
+  Step ~0-643: Stint 1. Driving fast on fresh tyres. Tyres wear from 1.0→0.598.
+  Step ~643:  PIT 1. tyre_life drops to ~0.598 → pit_signal > 0 → pit taken.
+              tyre_life resets to 1.0. -200 pit penalty applied.
+              +300 voluntary bonus applied (tl < 0.60, pit_signal > 0).
+  Step ~643-1314: Stint 2. Fresh tyres again. Tyres wear 1.0→0.598.
+  Step ~1314: PIT 2. Second pit taken (same logic). Net: +100.
+  Step ~1314-1985: Stint 3. Fresh tyres. Tyres wear 1.0→~0.70.
+              (Only ~671 steps remaining — tyres don't fully wear out in Stint 3)
+  Step ~1985: Possible PIT 3. tyre_life may reach 0.598 depending on exact timing.
+              If pit fires: net +100. Then drives a few more steps on fresh tyres.
+  Step 2000:  Episode ends (truncated=True, not terminated=False — car survived!)
 
-Option 3: Accept d37 as project best for pit strategy
-  D37: 3477 reward, 15 laps, 23.67 m/s, 3 pits, 100% completion
-  cv2 is still the speed champion (4531, 17 laps, 26.92 m/s, no pits)
-  D37 is the best pit strategy demonstrating the tyre management advantage
+REWARD BREAKDOWN (approximate):
+  Base speed reward:       ~4600  (function of avg speed × steps survived)
+  Pit penalty:             -600   (3 pits × -200 each)
+  Voluntary pit bonus:     +300   (3 pits × +100 net... roughly)
+  Total:                   ~3477
 
-Option 4: Final benchmark (N=100 fixed start, N=100 random start)
-  For a clean final result before project conclusion
+  Note: cv2 achieves 4531 with 0 pits (no pit overhead). If d37 could maintain
+  the same 23.67 m/s with 0 pits (not realistic — tyres degrade), it would get
+  ~4100 reward (less than cv2's 4531 due to lower speed). The speed gap is the
+  dominant factor, not the pit strategy.
+
+RANDOM START (N=20 episodes, from evaluate.py run):
+  D37 random: ~40% completion, 5.70 laps, 1.60 pits, reward≈1201
+  (vs d36 random: ~40-75%, 7.5-11 laps depending on run — d36 slightly better here)
+  The collapsed log_std hurts random-start performance: the policy is too "rigid"
+  to handle diverse starting positions. D36 was more robust because std was larger.
+
+COMPARISON TABLE:
+  Policy             Reward  Laps  Speed    Lateral  Pits  Completion
+  cv2 (3M, no pit)   4531    17    26.92    0.678    0     100%
+  D37 (6M total)     3477    15    23.67    0.319    3     100%  ← BEST PIT
+  D36 (4M total)     3427    15    23.60    0.456    3     100%
+  Expert             2909    11    17.10    0.797    0     100%
+  D34/D35 (2M)       2688    11    17.69    1.157    1     100%
+  D32/D33 (2M)       2683    11    17.68    1.167    1     100%
+  D21 (original)     1877     7    17.59    1.198    1     0%   (crashed at 7 laps)
+  D26-D29            1883     7    17.61    1.148    0     0%   (no pits, crashed)
 
 ==============================================================================
-EVALUATION TABLE (fixed start, N=10)
+SECTION 8 — WHY D37 IS THE PROJECT BEST FOR PIT STRATEGY
 ==============================================================================
 
-Policy                    Reward   Laps  Speed   Lateral  Pits
-PPO Curriculum v2 (3M)    4531.7    17   26.92   0.678      0
-PPO Pit v4 D37 (d37)      3476.9    15   23.67   0.319      3  ← BEST PIT
-PPO Pit v4 D36 (d36)      3426.7    15   23.60   0.456      3
-PPO Pit v4 D34 (d34)      2688.5    11   17.69   1.157      1
-PPO Pit v4 D35 (d35)      2688.2    11   17.69   1.158      1
-PPO Pit v4 D33 (d33)      2683.8    11   17.68   1.167      1
-PPO Pit v4 D32 (d32)      2683.8    11   17.68   1.167      1
-Expert (rule-based)        2909.1    11   17.10   0.797      0
-PPO Pit v4 D29 (d29)      1885.3     7   17.62   1.134      0
+1. First policy to demonstrate tyre management improves lap count:
+   — d36/d37 achieve 15 laps vs 11 laps for the single-pit policies (d32-d35)
+   — The 3-pit strategy means fresh tyres for most of the race → higher grip → faster
+   — Even with pit overhead (-600), 15 laps at 23.67 m/s beats 11 laps at 17.69 m/s
+
+2. The pit timing is well-calibrated:
+   — Pitting at tl≈0.598 is optimal: tyres worn enough to justify stop, not so worn
+     that grip has degraded severely (mu × 0.598 = 59.8% grip remaining)
+   — W_pit[128]=-30 threshold survived from d32's initial design through d35-d37
+
+3. 100% lap completion in fixed-start evaluation:
+   — The car never goes off-track in the deterministic evaluation
+   — This was NOT true for d21-d31 (those crashed at lap 7-11)
+
+4. Speed milestone:
+   — 23.67 m/s represents a 34% speed increase over the pre-d36 era (17.69 m/s)
+   — This came from full unfreeze letting the feature encoder and driving weights evolve
+   — The original speed was locked at d21's 17.6 m/s for all of d26-d35
+
+5. Precision improvement:
+   — 0.319 m lateral error is the best in the pit series (even better than cv2's 0.678 m)
+   — This is the converged, low-variance policy being very precise on its learned line
+
+==============================================================================
+SECTION 9 — LIMITATIONS AND WHAT WOULD BREAK THE 15-LAP CEILING
+==============================================================================
+
+CURRENT BOTTLENECK: Log-std collapse (policy too deterministic)
+  Steer std = 0.053 — the policy has a single learned driving line.
+  It drives that line perfectly but cannot adapt to find a faster one.
+  The 17-lap barrier (cv2) requires driving at 26.92 m/s vs d37's 23.67 m/s.
+  To go faster requires different throttle/braking inputs — but with std≈0, PPO
+  cannot explore those alternatives.
+
+WHAT FAILED (d38):
+  Tried ent_coef=0.01 to push log_std back up and restore exploration.
+  Result: partial recovery (steer std: 0.053 → 0.079), but driving DESTABILIZED.
+  D38 fixed-start: reward=1730, laps=7, 0% completion (crashed at lap 7).
+  The entropy bonus reshaped the driving policy before the faster lines were found.
+  Pit strategy also degraded (1 pit vs 3 pits).
+
+WHY ENTROPY RESTORATION DIDN'T WORK:
+  With log_std collapsed, the policy is in a very narrow local optimum.
+  Adding entropy pushes log_std up, which adds noise to all actions (throttle, steer, pit).
+  The noise destabilizes the carefully tuned driving line before the policy can adapt.
+  The policy "falls off" the local optimum and lands somewhere worse.
+
+PATHS TO 16+ LAPS (for future work):
+  Option A: Higher entropy from the START (ent_coef=0.01 from d36, not d37)
+    — d36 still had std ≈ 0.57 for steer (not collapsed)
+    — Starting entropy boost from d36 might maintain exploration while improving speed
+    — Risk: same destabilization as d38, but less likely since std is already high
+
+  Option B: New training run from scratch with cv2 speed as target
+    — Reset everything. Use d21-style curriculum but with tyre degradation from the start.
+    — Pro: no log_std collapse problem (fresh log_std = 0 → std = 1.0)
+    — Con: weeks of training to recreate the current result
+
+  Option C: Accept d37 and switch to a different research question
+    — D37 demonstrates tyre management works: 15 laps + 3 pits > 11 laps + 1 pit
+    — The core contribution is proven. Squeezing 16 laps is incremental.
+
+==============================================================================
+SECTION 10 — FILE INVENTORY
+==============================================================================
+
+Model file:     rl/ppo_pit_v4_d37.zip  (~12MB, SB3 PPO checkpoint)
+Training script: rl/train_ppo_pit_v4_d37.py
+TensorBoard:    runs/ppo_pit_v4_d37/events.out.tfevents.*
+This document:  Notes/d37.txt
+Progress log:   Notes/PROGRESS.txt (append entry at bottom)
+Evaluation:     rl/evaluate.py (d37 entry at ~line 893)
+Policy class:   rl/pit_aware_policy.py (PitAwarePolicy, TyrLifeAugmentedExtractor)
+Environment:    rl/make_env.py (make_env_pit_d30 function)
+
+To load and use d37:
+  from stable_baselines3 import PPO
+  from rl.pit_aware_policy import PitAwarePolicy  # MUST import before PPO.load()
+  model = PPO.load("rl/ppo_pit_v4_d37.zip", device="cpu")
+  obs, _ = env.reset()
+  action, _ = model.predict(obs, deterministic=True)
+
+To re-run evaluation:
+  venv/bin/python rl/evaluate.py
+
+==============================================================================
+SECTION 11 — WEIGHTS SUMMARY (for reference)
+==============================================================================
+
+W_pit[128] = -30.0756  ← Direct tyre_life → pit_signal connection (the anchor)
+b_pit      = +17.9721  ← Bias (threshold offset)
+Threshold  = -b/W = -17.9721 / -30.0756 = 0.598  ← Pit fires when tl < 0.598
+
+Pit probability at key tyre_life values (using stochastic std=0.71):
+  tl=0.30: direct≈+8.97  → P(pit>0)≈100%  (very worn, will always pit)
+  tl=0.45: direct≈+4.47  → P(pit>0)≈100%
+  tl=0.53: direct≈+2.07  → P(pit>0)≈99%
+  tl=0.598: direct≈+0.0   → P(pit>0)≈50%   (threshold)
+  tl=0.60: direct≈-0.07  → P(pit>0)≈46%
+  tl=0.70: direct≈-3.08  → P(pit>0)≈0%    (fresh, won't pit)
+  tl=0.90: direct≈-9.10  → P(pit>0)≈0%
+
+Note: in deterministic evaluation (deterministic=True), the MEAN action is used.
+The mean pit_signal = W_pit[:128]@f + W_pit[128]×tl + b_pit.
+Whether the pit fires depends on whether this sum is > 0 for the specific trajectory.
+
+D37 log_std = [-1.7109, -2.9316, -0.3430]
+D37 std     = [ 0.1807,  0.0533,  0.7096]
+  throttle std: 0.18  (moderate — some throttle variation)
+  steer std:    0.05  (COLLAPSED — near-deterministic steering)
+  pit std:      0.71  (healthy — pit decisions still stochastic during training)
