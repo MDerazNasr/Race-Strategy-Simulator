@@ -29,7 +29,7 @@ from rl.rewards import RacingReward
 class F1Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30} #info used for rendering
 
-    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False, pit_stops=False, forced_pit_interval=0, forced_pit_threshold=0.0, pit_timing_reward=False, voluntary_pit_reward=False, voluntary_pit_threshold=0.60):
+    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False, pit_stops=False, forced_pit_interval=0, forced_pit_threshold=0.0, pit_timing_reward=False, voluntary_pit_reward=False, voluntary_pit_threshold=0.60, safety_car=False, sc_trigger_prob=0.003, sc_speed_limit=22.0, sc_duration_range=(80, 200), sc_cooldown_steps=300, sc_speed_penalty=2.0):
         super().__init__()
         self.dt = dt #dt = how much simulated time passes each step(). Same as in Car
         self.render_mode = render_mode #render_mode = you'll use this later if you draw stuff
@@ -245,6 +245,13 @@ class F1Env(gym.Env):
             # conserve grip or push harder.
             obs_high = np.append(obs_high, 1.0).astype(np.float32)
             obs_low  = np.append(obs_low,  0.0).astype(np.float32)
+        if safety_car:
+            # Append sc_active ∈ {0.0, 1.0}:
+            #   1.0 = safety car is deployed (speed limit enforced, pits cheaper)
+            #   0.0 = green flag (race at full speed)
+            # D40: tyre_degradation=True + safety_car=True → 13D obs total.
+            obs_high = np.append(obs_high, 1.0).astype(np.float32)
+            obs_low  = np.append(obs_low,  0.0).astype(np.float32)
         self.observation_space = spaces.Box(
             low = obs_low,
             high = obs_high,
@@ -358,6 +365,43 @@ class F1Env(gym.Env):
         self.voluntary_pit_reward    = voluntary_pit_reward
         self.voluntary_pit_threshold = voluntary_pit_threshold
         self.VOLUNTARY_PIT_BONUS     = 300.0   # net cost of voluntary pit: -200+300=+100
+
+        # ── Safety car mode (Week 6 / d40) ────────────────────────────────────
+        # When True: random yellow-flag periods are inserted into each episode.
+        #
+        # MECHANICS:
+        #   Each step, if SC is inactive and the cooldown has expired, there is
+        #   a small probability (sc_trigger_prob) of deploying the safety car.
+        #   Once active, a countdown (sc_timer) runs for sc_duration_range steps,
+        #   then the green flag returns and a cooldown prevents an immediate repeat.
+        #
+        # EFFECTS during SC:
+        #   1. Speed penalty: -sc_speed_penalty per m/s above sc_speed_limit.
+        #      At cv2's 26.9 m/s this is -9.8/step — forces the agent to slow.
+        #   2. Pit bonus: agent-initiated pits get +sc_pit_bonus added to the
+        #      PIT_PENALTY, reducing net cost from -200 to -100.
+        #      This makes pitting under SC strictly cheaper than outside SC.
+        #
+        # OBSERVATION:
+        #   sc_active is appended as the last obs dimension (float {0.0, 1.0}).
+        #   The agent sees the flag and can learn to associate it with slowdowns
+        #   and strategic pit timing.
+        #
+        # STRATEGIC BEHAVIOR (goal):
+        #   Agent learns: when sc_active=1, slow to ~22 m/s AND consider pitting
+        #   (net cost only -100 vs -200). This is the "undercut" strategy used in
+        #   real F1 — pit under safety car to minimize lap time lost.
+        self.safety_car       = safety_car
+        self.sc_trigger_prob  = sc_trigger_prob
+        self.sc_speed_limit   = sc_speed_limit
+        self.sc_duration_range = sc_duration_range
+        self.sc_cooldown_steps = sc_cooldown_steps
+        self.sc_speed_penalty  = sc_speed_penalty
+        self.sc_active    = False
+        self.sc_timer     = 0
+        self.sc_cooldown  = 0       # steps until SC can trigger again after deactivation
+        self.sc_pit_bonus = 100.0   # net pit cost: -200 + 100 = -100 when SC active
+        self.sc_violations = 0      # steps over speed limit during SC (for logging)
     '''
     in RL your agent needs an observation vector each step: a compact summary of whats going on right now
 
@@ -464,6 +508,12 @@ class F1Env(gym.Env):
             tyre_life = float(getattr(self.car, 'tyre_life', 1.0))
             obs = np.append(obs, tyre_life).astype(np.float32)
 
+        if self.safety_car:
+            # [11 or 12] sc_active: 1.0 = safety car deployed, 0.0 = green flag.
+            # With tyre_degradation=True this is dim 12; without it, dim 11.
+            # D40 uses both → dim 12.
+            obs = np.append(obs, float(self.sc_active)).astype(np.float32)
+
         return obs
     '''
     Why sin(heading_error) and cos(heading_error) instead of heading_error directly?
@@ -492,6 +542,12 @@ class F1Env(gym.Env):
         # Reset pit state at the start of each episode.
         self.pit_cooldown_remaining = 0
         self.pit_count = 0
+        # Reset SC state at the start of each episode.
+        if self.safety_car:
+            self.sc_active    = False
+            self.sc_timer     = 0
+            self.sc_cooldown  = 0
+            self.sc_violations = 0
 
         if options and options.get("fixed_start"):
             # ── Fixed start: waypoint 0, track-aligned, v=5 m/s ──────────────
@@ -637,6 +693,11 @@ class F1Env(gym.Env):
                 self.pit_cooldown_remaining = self.PIT_COOLDOWN_STEPS
                 self.pit_count += 1
 
+                # SC pit bonus (d40): agent-initiated pit under safety car costs only -100.
+                # Net: -200 (penalty) + 100 (bonus) = -100. Incentivises SC undercut.
+                if self.safety_car and self.sc_active and agent_pit:
+                    pit_reward += self.sc_pit_bonus
+
                 # Pit timing reward shaping (d23): applies ONLY to voluntary pits.
                 # Forced pits (curriculum) get standard PIT_PENALTY only.
                 if self.pit_timing_reward and agent_pit and not time_forced and not state_forced:
@@ -660,6 +721,39 @@ class F1Env(gym.Env):
         if self.pit_cooldown_remaining > 0:
             self.pit_cooldown_remaining -= 1
 
+        # ── Safety car state machine (d40) ────────────────────────────────────
+        # Run every step: advance SC countdown or randomly trigger a new period.
+        # sc_speed_penalty_reward is added to the total reward below.
+        sc_speed_penalty_reward = 0.0
+        if self.safety_car:
+            if self.sc_active:
+                self.sc_timer -= 1
+                if self.sc_timer <= 0:
+                    # SC period ends — enter cooldown before it can trigger again
+                    self.sc_active   = False
+                    self.sc_cooldown = self.sc_cooldown_steps
+                # Speed penalty: agent must slow to sc_speed_limit under SC.
+                # At cv2's 26.9 m/s this is -9.8/step — strong signal to decelerate.
+                v_raw = self.car.v
+                if v_raw > self.sc_speed_limit:
+                    sc_speed_penalty_reward = -self.sc_speed_penalty * (v_raw - self.sc_speed_limit)
+                    self.sc_violations += 1
+            else:
+                if self.sc_cooldown > 0:
+                    self.sc_cooldown -= 1
+                elif self.np_random.random() < self.sc_trigger_prob:
+                    self.sc_active = True
+                    self.sc_timer  = int(self.np_random.integers(
+                        self.sc_duration_range[0], self.sc_duration_range[1] + 1
+                    ))
+
+        # Sync obs[-1] to current sc_active state.
+        # get_obs() was called before the SC state machine above, so if SC just
+        # triggered this step, obs[-1] would be stale (0.0 even though sc_active=True).
+        # Update in-place so the returned obs is always consistent with the reward.
+        if self.safety_car:
+            obs[-1] = float(self.sc_active)
+
         # 3. Determine termination before computing reward, because the
         #    terminal penalty is baked into RacingReward.compute().
         lateral_error = obs[2]  # normalized: raw / 3.0, range ≈ [-1, 1]
@@ -682,10 +776,11 @@ class F1Env(gym.Env):
             action=np.array(action[:2], dtype=np.float32),   # reward_fn uses [throttle, steer] only
             prev_action=self._prev_action,
             terminated=terminated,
-        ) + lap_bonus + pit_reward
+        ) + lap_bonus + pit_reward + sc_speed_penalty_reward
         # lap_bonus is +100.0 exactly once per completed lap, 0.0 on all other steps.
         # pit_reward is PIT_PENALTY (-200) when a pit fires, 0.0 otherwise.
-        # Both are added AFTER reward_fn so they don't interfere with shaped terms.
+        # sc_speed_penalty_reward is ≤ 0: penalises exceeding the SC speed limit.
+        # All are added AFTER reward_fn so they don't interfere with shaped terms.
         # reward_fn receives action[:2] (throttle, steer) — it doesn't know about pit_signal.
 
         # 5. Store current obs/action for next step's smoothness penalty.
@@ -718,6 +813,9 @@ class F1Env(gym.Env):
             # pit_cooldown: steps remaining until next pit allowed (0 = available).
             "pit_count":    self.pit_count,
             "pit_cooldown": self.pit_cooldown_remaining,
+            # Safety car telemetry (d40) — only meaningful when safety_car=True.
+            "sc_active":    bool(self.sc_active),
+            "sc_violations": self.sc_violations,
         }
         return obs, reward, terminated, truncated, info
 

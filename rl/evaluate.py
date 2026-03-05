@@ -510,6 +510,18 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
         env_multi = F1MultiAgentEnv()
     except ImportError:
         env_multi = None
+    # Safety car env (13D obs, 3D actions) — for d40 policy.
+    try:
+        env_sc = F1Env(
+            multi_lap=True,
+            tyre_degradation=True,
+            pit_stops=True,
+            voluntary_pit_reward=True,
+            voluntary_pit_threshold=0.60,
+            safety_car=True,
+        )
+    except Exception:
+        env_sc = None
 
     start_label = "FIXED START" if fixed_start else "RANDOM START"
     print("=" * 60)
@@ -942,6 +954,25 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional_file": "ppo_multi_agent_d39.zip",
             "env_key":       "multi",
         },
+        {
+            "name":  "PPO Safety Car D40 (d40)",
+            "color": "#00897B",
+            # D40: Safety car / yellow flag events.
+            # Extends D37 (12D, 3D action) to 13D obs via extend_obs_dim. New dim:
+            #   [12] sc_active ∈ {0.0, 1.0} (1 = safety car deployed)
+            # Additional reward effects:
+            #   - SC speed penalty: -2.0 per m/s above 22 m/s when SC active
+            #   - SC pit bonus: +100 when agent pits under SC (net cost -200→-100)
+            # Goal: agent learns to slow under SC AND time pits to SC windows (undercut).
+            # ent_coef=0.01 from start — prevents log_std collapse (d38 lesson).
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_sc_d40.zip"), device,
+                obs_dim=13,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_sc_d40.zip",
+            "env_key":       "sc",
+        },
     ]
 
     summaries = []
@@ -974,6 +1005,11 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
                 print(f"  Skipping: {cfg['name']} (env.f1_multi_env not available)")
                 continue
             eval_env = env_multi
+        elif cfg.get("env_key") == "sc":
+            if env_sc is None:
+                print(f"  Skipping: {cfg['name']} (safety_car env not available)")
+                continue
+            eval_env = env_sc
         elif cfg.get("optional_file") == "ppo_tyre.zip":
             eval_env = env_tyre
         else:

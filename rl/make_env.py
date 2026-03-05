@@ -151,6 +151,50 @@ def make_env_pit_d30():
     return env
 
 
+def make_env_sc():
+    """
+    Creates a safety car environment instance for SB3 (Week 6 / d40).
+
+    WHAT'S DIFFERENT vs make_env_pit_d30():
+      - F1Env(..., safety_car=True) is used.
+      - Observation is 13D: [12D pit env obs] + [sc_active ∈ {0, 1}].
+      - Action space is 3D (same as pit env): [throttle, steer, pit_signal].
+      - Additional reward terms:
+          sc_speed_penalty  = -2.0 × max(0, v - 22.0) per step during SC
+          sc_pit_bonus      = +100 when agent pits under SC (net cost: -100 vs -200)
+
+    STRATEGIC GOAL:
+      Agent must learn: when sc_active=1, slow to ~22 m/s AND consider pitting
+      (pit costs only -100 under SC vs -200 outside). This is the "undercut" —
+      pit under safety car to minimize lap time lost relative to opponents.
+
+    SC PARAMETERS (see f1_env.py safety car block for rationale):
+      sc_trigger_prob = 0.003   (~1 SC per 2.5 laps)
+      sc_speed_limit  = 22.0    (m/s, ~80 km/h)
+      sc_duration     = 80–200  (steps = 8–20 seconds)
+      sc_cooldown     = 300     (steps between SCs)
+      sc_speed_penalty = 2.0    (per m/s over limit)
+
+    TRAINING NOTE:
+      Load ppo_pit_v4_d37 (12D, 3D action) and extend to 13D using
+      extend_obs_dim(model, 12, 13). sc_active bounds [0, 1] are
+      the extend_obs_dim defaults — no manual fix needed.
+      Recreate rollout buffer after extension (same fix as D39).
+
+    Used in: rl/train_ppo_sc_d40.py (d40)
+    """
+    env = F1Env(
+        multi_lap=True,
+        tyre_degradation=True,
+        pit_stops=True,
+        voluntary_pit_reward=True,
+        voluntary_pit_threshold=0.60,
+        safety_car=True,
+    )
+    env = Monitor(env)
+    return env
+
+
 def make_env_multi_agent():
     """
     Creates a multi-agent environment instance for SB3 (D39).
