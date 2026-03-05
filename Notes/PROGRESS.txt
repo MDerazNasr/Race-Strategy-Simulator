@@ -1407,3 +1407,37 @@ Log_std maintained: throttle 0.186→0.280, steer 0.063→0.085 (ent_coef=0.01 w
 Limitation: opponent must be FASTER than ego (>28 m/s) to force strategic behavior.
 
 NEXT: Option A (opponent at 28+ m/s) OR Option B (safety car/weather).
+
+==============================================================================
+D40: Safety Car / Yellow Flag Events (2026-03-05)
+==============================================================================
+
+NEW FEATURE: safety_car=True parameter added to F1Env
+New reward terms: SC speed penalty (-2.0/m/s above 22 m/s), SC pit bonus (+100)
+New obs dim: sc_active ∈ {0,1} at dim 12 (13D total with tyre_degradation)
+
+SC Parameters: trigger_prob=0.003/step, speed_limit=22 m/s, duration=80–200 steps,
+  cooldown=300 steps, speed_penalty=2.0/m/s, pit_bonus=+100
+
+Training: extend D37 (12D→13D), ent_coef=0.01, cosine LR 1e-4→1e-6, 3M steps, 1417s
+ep_rew: 30,700 (start) → 52,700 (final, +71%)
+ep_len: 20,600 (start) → 30,400 (final, +48%)
+
+Results fixed start (N=10, stochastic due to SC randomness):
+  reward=3820.2 ±59.19, laps=13, speed=21.68 m/s, lat_err=0.487 m, pits=2, completion=100%
+
+Results random start (N=20):
+  reward=2628.2 ±1754.4, laps=9.3, speed=16.78 m/s, pits=1.70, completion=65%
+
+SC compliance: duty_cycle=21.1%, violation_rate=57.6% (over 22 m/s during SC)
+
+Key finding: col[12] (sc_active) carries ZERO learned weight — same pattern as D39.
+Agent found STATIC SPEED EQUILIBRIUM at 21.68 m/s (below SC limit on average) rather
+than CONDITIONAL behavior (fast on green, slow on SC). The static strategy avoids most
+SC penalties without needing sc_active signal. Speed drop: 23.67 → 21.68 m/s (-8.4%),
+costs 2 laps vs D37 in same env.
+
+For true conditional SC behavior: add green-flag speed bonus (+reward when v>25 AND
+sc_active=False) to make static slow strategy suboptimal.
+
+Log_std maintained: throttle 0.198→0.351 (+77%), pit std 0.60→1.29 (+115%) ✓

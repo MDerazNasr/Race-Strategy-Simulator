@@ -1,0 +1,199 @@
+==============================================================================
+D40: Safety Car / Yellow Flag Events
+==============================================================================
+
+DATE: 2026-03-05
+TRAINING TIME: 1417s (~24 min), 3M steps, CPU
+
+==============================================================================
+WHAT WAS BUILT
+==============================================================================
+
+Added safety_car=True parameter to F1Env (env/f1_env.py):
+  - SC state machine: Bernoulli trigger (prob=0.003/step when SC inactive and
+    sc_cooldown=0), duration 80–200 steps, 300-step cooldown between events.
+  - Speed penalty: -sc_speed_penalty × max(0, v - sc_speed_limit) per step
+    (default: -2.0/m/s above 22 m/s). At cv2's 26.9 m/s → -9.8/step.
+  - Pit bonus: +100 when agent pits under SC (net pit cost -200 → -100).
+    Incentivises the "undercut" — pit under SC when opponent also slows.
+  - Obs: sc_active (0.0/1.0) appended as last dim (dim 12 with tyre+sc → 13D).
+    Synced AFTER SC state machine to avoid one-step delay.
+
+SC Parameters:
+  sc_trigger_prob  = 0.003/step   (~1 SC per 333 steps ≈ 2.5 laps)
+  sc_speed_limit   = 22.0 m/s    (same as D39 ExpertDriver opponent)
+  sc_duration_range = (80, 200) steps (8–20 seconds)
+  sc_cooldown_steps = 300         (~2.5 laps between SCs)
+  sc_speed_penalty  = 2.0/m/s    (strong compliance incentive)
+  sc_pit_bonus      = +100        (net pit cost -100 under SC)
+
+Training setup:
+  - Start: ppo_pit_v4_d37.zip (12D obs, 3D action) → extend to 13D
+  - extend_obs_dim(model, 12, 13): sc_active bounds [0.0, 1.0] (defaults correct)
+  - RolloutBuffer recreated with 13D obs (same fix as D39, critical for SB3)
+  - LR: cosine 1e-4 → 1e-6
+  - ent_coef = 0.01 FROM THE START (lesson from d38: prevent log_std collapse)
+  - Full unfreeze: all params trainable
+  - Env: make_env_sc() — F1Env(multi_lap=True, tyre_degradation=True,
+         pit_stops=True, voluntary_pit_reward=True, safety_car=True)
+
+==============================================================================
+TRAINING LOG
+==============================================================================
+
+Initial (D37 policy in SC env, ~65k steps): ep_rew=30,700, ep_len=20,600
+  → D37 baseline performance in the SC environment (before any adaptation)
+
+Final (3M steps):           ep_rew=52,700, ep_len=30,400  (+71% reward, +48% length)
+Final LR: 1e-6 (minimum), clip_fraction=0 → fully converged
+
+==============================================================================
+POST-TRAINING WEIGHT DIAGNOSTICS
+==============================================================================
+
+policy_net[0] abs_mean: 0.070232 → 0.064830  (-7.7%)  ← features adapted
+policy_net[2] abs_mean: 0.021222 → 0.021811  (+2.8%)
+
+Critical finding — new obs column:
+  col[12] (sc_active) abs_mean = 0.000000  (zero throughout training)
+
+log_std: [-1.6204, -2.3239, -0.5098] → [-1.0475, -2.2743, 0.2567]
+std:     [0.1979, 0.0980,  0.6001]   → [0.3508,  0.1029,  1.2927]
+         throttle +77%, steer +5%, pit +115%  ← ent_coef=0.01 maintained exploration ✓
+
+Notably: pit_std increased from 0.60 to 1.29 — agent more exploratory with pit timing.
+
+==============================================================================
+RESULTS
+==============================================================================
+
+FIXED START (N=10, stochastic due to random SC events):
+  reward:     3820.2 ± 59.19   (stochastic even with det. policy — SC is random)
+  laps:       13
+  speed:      21.68 m/s        ← BELOW the 22 m/s SC speed limit
+  lat_err:    0.487 m
+  pits:       2.0
+  completion: 100%
+
+RANDOM START (N=20):
+  reward:     2628.2 ± 1754.4
+  laps:       9.3
+  speed:      16.78 m/s
+  pits:       1.70
+  completion: 65%
+
+SC COMPLIANCE CHECK (1 fixed-start episode, 2000 steps):
+  SC duty cycle:  21.1% of steps (422/2000) — matches expected ~18%
+  Violation rate: 57.6% of SC steps above 22 m/s
+
+==============================================================================
+KEY FINDING: STATIC SPEED EQUILIBRIUM, NOT CONDITIONAL BEHAVIOR
+==============================================================================
+
+The zero weight on col[12] (sc_active) reveals that D40 found a STATIC speed
+strategy rather than a CONDITIONAL one:
+
+  D37 policy: ~23.67 m/s always, large SC penalties when SC fires
+  D40 policy: ~21.68 m/s always, few SC penalties (avg below limit)
+  Ideal:      ~26.9 m/s when green, ~22 m/s when SC (conditional on sc_active)
+
+Why D40 settled on a static slow strategy:
+  1. The SC penalty incentivised LOWERING average speed, which PPO achieved by
+     training on the env where 18% of time incurs -9.8/step penalty at cv2 speed.
+  2. The optimal STATIC speed (ignoring sc_active) is somewhere below 22 m/s
+     to minimise expected penalty. PPO found ~21.68 m/s as its equilibrium.
+  3. A CONDITIONAL strategy (fast green, slow SC) would require using col[12],
+     but the static strategy gives ~zero gradient through col[12] because the
+     policy doesn't need it to reduce expected penalty.
+  4. Similar to D39: when a simpler strategy works, PPO doesn't bother learning
+     the more complex conditional strategy.
+
+The 57.6% SC violation rate during SC periods shows the agent is NOT
+specifically slowing for SC — it just naturally averages 21.68 m/s due to its
+lowered speed target. On straights it still exceeds 22 m/s, incurring penalties
+it can't avoid without the sc_active signal.
+
+This is a correct but suboptimal equilibrium: a static slow policy that
+eliminates most SC penalties but sacrifices 2 laps vs D37 (13 vs 15).
+
+==============================================================================
+COMPARISON TABLE
+==============================================================================
+
+Policy              | Env     | Reward | Laps | Speed    | Pits | Notes
+--------------------|---------|--------|------|----------|------|------------------
+cv2 (speed champ)   | single  | 4531   | 17   | 26.92    | 0    | baseline
+D37 (pit champ)     | pit     | 3477   | 15   | 23.67    | 3    | best pit
+D39 (multi-agent)   | multi   | 6025   | 17   | 26.91    | 0    | 5 overtakes
+D40 (safety car)    | sc      | 3820   | 13   | 21.68    | 2    | static slow strat
+
+Notes:
+  - D40's 3820 is in the SC env (includes SC penalties and pit bonuses), not directly
+    comparable to D37's 3477 (pit env, no SC). In the SC env, D37 would earn ~2275.
+  - D40's speed drop (23.67 → 21.68 m/s) costs 2 laps vs D37 in SC env.
+
+==============================================================================
+FOR TRUE CONDITIONAL BEHAVIOR (WHAT WOULD CHANGE IT)
+==============================================================================
+
+To force PPO to use col[12] and learn genuine SC awareness:
+
+Option A — Higher SC limit on green, harder to average below:
+  Set sc_speed_limit=18.0 m/s (hard to always stay below → must be conditional)
+  Agent can't avoid SC penalty with a static slow strategy below 18 m/s.
+
+Option B — Green-flag speed bonus:
+  Add +1.0/step bonus when v > 25 m/s AND sc_active=False.
+  Creates direct incentive to drive faster on green laps → must slow on SC.
+
+Option C — Opponent + SC (combine D39 + D40):
+  Add the D39 ExpertDriver opponent at 25 m/s AND safety car events.
+  Falling behind opponent (track_gap > 0) is costly, so agent must drive fast
+  on green laps → pure slow strategy loses to opponent.
+
+==============================================================================
+WHAT'S PRESERVED / WHAT'S GAINED vs D37
+==============================================================================
+
+PRESERVED:
+  - 100% fixed-start completion
+  - 2 pit stops (voluntary pitting still working)
+  - log_std maintained (ent_coef=0.01 prevented collapse)
+
+CHANGED vs D37 (in SC env):
+  - Speed: 23.67 → 21.68 m/s (-8.4%)  — adapted to SC penalty regime
+  - Laps: 15 → 13 (-2)                 — lower speed costs laps
+  - Reward: 3477 (pit env) → 3820 (SC env) — not directly comparable
+
+LIMITATION:
+  - col[12] (sc_active) carries zero weight — no genuine SC awareness
+  - Static slow strategy, not conditional pit timing
+  - SC violation rate 57.6% — agent still speeds on straights during SC
+
+==============================================================================
+FILES
+==============================================================================
+
+Modified: env/f1_env.py                    — safety_car parameter + SC state machine
+New:      rl/train_ppo_sc_d40.py           — training script
+New:      rl/ppo_sc_d40.zip                — trained policy
+New:      runs/ppo_sc_d40/                 — TensorBoard logs
+Modified: rl/make_env.py                   — make_env_sc()
+Modified: rl/evaluate.py                   — d40 entry + env_sc routing
+New:      Notes/d40.txt                    — this file
+
+==============================================================================
+WHAT'S NEXT
+==============================================================================
+
+Option A — True SC-conditional behavior:
+  Add green-flag speed bonus (+reward when v>25 m/s AND sc_active=False).
+  Forces agent to maintain high green-flag speed → must condition on sc_active.
+
+Option B — Wrap up the project:
+  Write final project report summarizing the full arc:
+    d1–d16:  BC + curriculum → cv2 (26.92 m/s, 17 laps, 4531 reward)
+    d17–d37: Pit stop discovery through 20 experiments
+    d38:     Failed entropy restoration (prevent collapse, don't restore it)
+    d39:     Multi-agent racing (5 overtakes, speed advantage strategy)
+    d40:     Safety car events (static slow equilibrium)
