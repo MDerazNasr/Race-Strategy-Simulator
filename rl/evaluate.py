@@ -517,6 +517,14 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
         env_multi_d41 = _F1MA(opp_max_speed=27.0)
     except ImportError:
         env_multi_d41 = None
+    # Intermediate multi-agent env (13D obs, 2D actions) — for d43 policy.
+    # Opponent at 25.0 m/s — 2 m/s below ego top speed (sweet spot between
+    # D39's trivial 22 m/s and D41's impossible 27 m/s).
+    try:
+        from env.f1_multi_env import F1MultiAgentEnv as _F1MA43
+        env_multi_d43 = _F1MA43(opp_max_speed=25.0)
+    except ImportError:
+        env_multi_d43 = None
     # Safety car env (13D obs, 3D actions) — for d40 policy.
     try:
         env_sc = F1Env(
@@ -978,6 +986,22 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "env_key":       "multi_d41",
         },
         {
+            "name":  "PPO Multi-Agent D43 (d43)",
+            "color": "#AB47BC",
+            # D43: Intermediate opponent — sweet spot between D39 (trivial) and D41 (too hard).
+            # D39 (opp=22): col[11] weight=0, 100% laps — no strategy, pure speed.
+            # D41 (opp=27): col[11] weight>0, 0% laps — strategy activated, but eval broken.
+            # D43 (opp=25): hypothesis — col[11] weight>0 AND reliable lap completion.
+            # Warm-start from D41 which already has non-zero positional weights.
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_multi_agent_d43.zip"), device,
+                obs_dim=13,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_multi_agent_d43.zip",
+            "env_key":       "multi_d43",
+        },
+        {
             "name":  "PPO Safety Car D40 (d40)",
             "color": "#00897B",
             # D40: Safety car / yellow flag events.
@@ -1033,6 +1057,11 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
                 print(f"  Skipping: {cfg['name']} (env.f1_multi_env not available)")
                 continue
             eval_env = env_multi_d41
+        elif cfg.get("env_key") == "multi_d43":
+            if env_multi_d43 is None:
+                print(f"  Skipping: {cfg['name']} (env.f1_multi_env not available)")
+                continue
+            eval_env = env_multi_d43
         elif cfg.get("env_key") == "sc":
             if env_sc is None:
                 print(f"  Skipping: {cfg['name']} (safety_car env not available)")

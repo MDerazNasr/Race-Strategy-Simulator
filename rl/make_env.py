@@ -291,6 +291,41 @@ def make_env_multi_agent_d41():
     return env
 
 
+def make_env_multi_agent_d43():
+    """
+    Creates a competitive multi-agent environment for SB3 (D43).
+
+    WHAT'S DIFFERENT vs make_env_multi_agent_d41():
+      - F1MultiAgentEnv(opp_max_speed=25.0) — opponent is fast but not equal.
+      - D41 used opp_max_speed=27.0 (ego=27 m/s) → training reward 3170 but
+        deterministic eval = 0 laps, 0% completion. Equal-speed competition
+        is too hard: no speed buffer means any misalignment causes collision,
+        and the policy relies entirely on stochastic noise to survive.
+      - 25 m/s closes the raw-speed shortcut (D39 opp=22: ego 26.9 m/s had
+        4.9 m/s advantage → no positional awareness needed) while still giving
+        the ego a ~2 m/s buffer (~8% speed advantage) to complete laps reliably.
+
+    STRATEGIC GOAL:
+      Prove simultaneous: (1) track_gap weight non-zero AND (2) reliable lap
+      completion. Neither D39 (weight=0, laps=17) nor D41 (weight>0, laps=0)
+      achieved both at once. D43 is the sweet spot.
+
+    TRAINING NOTE:
+      Warm-start from D41 (ppo_multi_agent_d41.zip, 13D obs, 2D action).
+      D41 already has non-zero track_gap weights from learning against the 27
+      m/s opponent — it should adapt faster to the slightly easier 25 m/s task.
+      No obs extension needed — same 13D obs space, same action space.
+      Reset Adam optimizer (D41 optimizer state may have stale momentum from
+      its own convergence at 27 m/s — fresh optimizer avoids interference).
+
+    Used in: rl/train_ppo_multi_agent_d43.py (d43)
+    """
+    from env.f1_multi_env import F1MultiAgentEnv
+    env = F1MultiAgentEnv(opp_max_speed=25.0)
+    env = Monitor(env)
+    return env
+
+
 def make_env_pit_d23():
     """
     Creates a pit-stop environment with pit timing reward shaping (Week 5 / d23).
