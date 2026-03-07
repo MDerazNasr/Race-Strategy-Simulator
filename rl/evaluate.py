@@ -525,7 +525,7 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
         env_multi_d43 = _F1MA43(opp_max_speed=25.0)
     except ImportError:
         env_multi_d43 = None
-    # Stronger position-bonus env (13D obs, 2D actions) — for d44 policy.
+    # Stronger position-bonus env (13D obs, 2D actions) — for d44+d45 policies.
     # Opponent at 25.0 m/s, position_bonus=2.0 (vs 0.5 in D39–D43).
     # Breaks the "follow closely" equilibrium by making being ahead 4x more valuable.
     try:
@@ -1024,6 +1024,21 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "optional":      True,
             "optional_file": "ppo_multi_agent_d44.zip",
             "env_key":       "multi_d44",
+        },
+        {
+            "name":  "PPO Multi-Agent D45 (d45)",
+            "color": "#4A148C",
+            # D45: Fine-tune D44 (pos_bonus=2.0) for 3M more steps.
+            # D44 broke the follow equilibrium (speed=26.91, 3 laps) but crashes after 3.
+            # D45 goal: stabilize overtaking, reach 100% lap completion.
+            # Same env as D44 (opp=25, pos_bonus=2.0); lower LR (3e-5→1e-6) for fine-tune.
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_multi_agent_d45.zip"), device,
+                obs_dim=13,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_multi_agent_d45.zip",
+            "env_key":       "multi_d44",   # same env as D44
         },
         {
             "name":  "PPO Safety Car D40 (d40)",

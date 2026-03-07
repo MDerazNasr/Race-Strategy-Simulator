@@ -1,0 +1,77 @@
+D44 — Stronger Position Bonus (2.0/step vs 0.5)
+==================================================
+Date: 2026-03-07
+
+OBJECTIVE
+---------
+D43 converged to a "follow at opponent speed" equilibrium: position_bonus=0.5/step
+made being ahead worth only +1000/ep. The deterministic ego ran at 24.36 m/s < opp
+25 m/s, so it was never ahead. Hypothesis: raise position_bonus to 2.0 → being
+ahead worth +4000/ep → strong enough to force aggressive overtaking.
+
+TRAINING LOG
+------------
+Device: CPU
+Total steps: 3,000,000
+Time: ~1579 seconds (~26 min)
+Init: D43 (col[11]=0.021558, col[12]=0.009047, std=[0.616, 0.116])
+LR: cosine 1e-4 → 1e-6
+ent_coef: 0.01
+Env: F1MultiAgentEnv(opp_max_speed=25.0, position_bonus=2.0)
+
+Training progression: ep_rew grew rapidly early (1260→2560 in first 6k steps)
+  indicating fast adaptation to the new reward scale.
+Final: ep_rew_mean = 3820, ep_len_mean = 1040, clip_fraction = 0 (converged)
+
+POST-TRAINING WEIGHT DIAGNOSTICS
+----------------------------------
+policy_net[0] abs_mean = 0.061044  [D43: +10.2%]
+policy_net[2] abs_mean = 0.017733  [D43: +2.6%]
+col[11] (track_gap) abs_mean = 0.055003  [D43=0.021558] ← +155% ✓
+col[12] (opp_speed) abs_mean = 0.012676  [D43=0.009047]
+log_std = [-0.2302, -2.1964]
+std     = [0.7944, 0.1112]
+
+KEY FINDING: track_gap weight surged 2.5x (+155%). The stronger position bonus
+created a much stronger gradient toward positional awareness. This is the largest
+single-experiment increase in track_gap weight across the entire D39-D44 lineage.
+
+EVALUATION RESULTS (fixed start, N=10, deterministic)
+------------------------------------------------------
+Reward: 1834.4
+Laps: 3.00
+Speed: 26.91 m/s    ← FULL SPEED RESTORED (was 24.36 in D43)
+Lateral error: 1.285 m
+Completion: 0%      ← crashes after 3 laps
+
+PROGRESS vs PREVIOUS EXPERIMENTS:
+  D39 (opp=22): 6025, 17 laps, 100% — no strategy
+  D41 (opp=27): 69, 0 laps, 0%   — strategy but can't race
+  D43 (opp=25): 275, 0 laps, 0%  — strategy but follow equil.
+  D44 (opp=25, pb=2): 1834, 3 laps, 0% — FOLLOW EQUIL. BROKEN ✓
+
+FOLLOW EQUILIBRIUM IS BROKEN:
+  D43 deterministic speed = 24.36 m/s (below 25 m/s opp → always behind)
+  D44 deterministic speed = 26.91 m/s (above 25 m/s opp → races ahead)
+  The 4x position bonus forced the agent out of the follow local optimum.
+
+REMAINING PROBLEM: CRASHES AFTER ~3 LAPS
+------------------------------------------
+The agent now drives at full speed (26.91 m/s) and completes 3 laps before
+crashing. Since fixed-start evaluation is fully deterministic, it crashes at the
+same point every time. Likely cause:
+  - The ego (26.91) laps the opponent (25.0) after ~24 laps of track distance.
+    At 314m oval with Δv=1.91 m/s: lapping time ≈ 314/1.91 ≈ 164s = 1640 steps.
+    Actually at 1040 step avg ep_len, ego laps opp at ~1640 steps (0.82 laps ahead).
+  - The crash might be occurring when the ego tries to overtake the opponent at
+    26.91 m/s: collision physics causes the ego to go off-track.
+  - OR: the stronger position_bonus makes the policy more aggressive in corners,
+    resulting in higher lateral error → crash at specific track section.
+
+NEXT: D45 — continue training D44 for 3M more steps.
+  The reward signal is now correct. The agent just needs more time to refine
+  the overtaking maneuver without going off-track.
+
+SAVED FILES
+-----------
+rl/ppo_multi_agent_d44.zip — trained model
