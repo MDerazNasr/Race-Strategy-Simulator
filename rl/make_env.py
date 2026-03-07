@@ -326,6 +326,45 @@ def make_env_multi_agent_d43():
     return env
 
 
+def make_env_multi_agent_d44():
+    """
+    Creates a competitive multi-agent environment for SB3 (D44).
+
+    WHAT'S DIFFERENT vs make_env_multi_agent_d43():
+      - position_bonus raised from 0.5 → 2.0 per step when ego is ahead.
+      - Everything else identical: opp_max_speed=25.0, overtake_bonus=200,
+        collision_radius=3.0m, collision_penalty=0.5/step.
+
+    WHY D43 FAILED (deterministic eval = 0 laps, 275 reward):
+      D43's policy converged to a "follow closely" equilibrium.
+      At opp=25 m/s, the deterministic mean throttle yielded ego speed 24.36 m/s
+      — BELOW the opponent's 25 m/s. The agent was frequently behind the opponent,
+      accumulating only 0.5/step when occasionally ahead. The follow strategy
+      (no collision, small position bonus) was a local optimum.
+
+    WHY position_bonus=2.0 FIXES THIS:
+      Being ahead for a full 2000-step episode now yields +4000 vs the old +1000.
+      The reward gradient strongly favors "drive fast and stay ahead" over "follow."
+      The overtake must still be executed, but the RETURN on being ahead is 4x,
+      making it worth the effort of pushing through the opponent's position.
+
+      Value of being ahead:    0.5 * 2000 = +1000 (old)  →  2.0 * 2000 = +4000 (new)
+      Value of following behind:  0 (unchanged)
+      Net advantage of overtaking: +1000 → +4000
+
+    TRAINING NOTE:
+      Warm-start from D43 (ppo_multi_agent_d43.zip, 13D obs, 2D action).
+      D43 already has strong track_gap weights (0.022) — it knows how to read
+      position, just needs the incentive to act on it more aggressively.
+
+    Used in: rl/train_ppo_multi_agent_d44.py (d44)
+    """
+    from env.f1_multi_env import F1MultiAgentEnv
+    env = F1MultiAgentEnv(opp_max_speed=25.0, position_bonus=2.0)
+    env = Monitor(env)
+    return env
+
+
 def make_env_pit_d23():
     """
     Creates a pit-stop environment with pit timing reward shaping (Week 5 / d23).

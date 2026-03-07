@@ -1,0 +1,62 @@
+D43 — Intermediate Multi-Agent Opponent (25 m/s)
+==================================================
+Date: 2026-03-07
+
+OBJECTIVE
+---------
+D41 (opp=27 m/s): proved track_gap weight becomes non-zero, BUT 0% eval completion.
+D43 hypothesis: opp=25 m/s is the "sweet spot" — closes shortcut, keeps ~2 m/s
+speed advantage for reliable lap completion. Warm-start from D41's non-zero weights.
+
+TRAINING LOG
+------------
+Device: CPU
+Total steps: 3,000,000
+Time: ~1635 seconds (~27 min)
+Init: D41 (col[11]=0.015824, col[12]=0.004787)
+LR: cosine 1e-4 → 1e-6
+ent_coef: 0.01
+
+Final: ep_rew_mean = 3390, ep_len_mean = 1170, clip_fraction = 0 (converged)
+
+POST-TRAINING WEIGHT DIAGNOSTICS
+----------------------------------
+policy_net[0] abs_mean = 0.055373  [D41: +6.4%]
+policy_net[2] abs_mean = 0.017288  [D41: +5.0%]
+col[11] (track_gap) abs_mean = 0.021558  [D41=0.015824] ← INCREASED ✓
+col[12] (opp_speed) abs_mean = 0.009047  [D41=0.004787] ← INCREASED ✓
+log_std = [-0.4848, -2.1549]
+std     = [0.6158, 0.1159]
+
+EVALUATION RESULTS (fixed start, N=10, deterministic)
+------------------------------------------------------
+Reward: 275.2
+Laps: 0.00
+Speed: 24.36 m/s
+Lateral error: 1.426 m
+Completion: 0%
+
+ROOT CAUSE ANALYSIS — THE FOLLOW EQUILIBRIUM
+---------------------------------------------
+Deterministic eval speed = 24.36 m/s < opponent 25 m/s.
+The agent learned a "follow closely at opponent speed" local optimum:
+  - At opp=25, matching opponent speed gives occasional position bonuses
+    (sometimes ahead, sometimes behind) with minimal collision penalty
+  - Training (stochastic): noise occasionally pushes ego faster → sometimes
+    gets +200 overtake bonus and stays ahead briefly → ep_rew=3390
+  - Eval (deterministic): mean throttle = 24.36 m/s < 25 m/s opponent
+    → never gets ahead → collision or stuck behind → 0 laps
+
+The col[11] weight increased (0.016 → 0.022) proving positional awareness is
+there, but the position_bonus=0.5/step only rewards +1000/episode for staying
+ahead. This isn't large enough to break out of the follow equilibrium.
+
+Value of being ahead:   0.5 × 2000 = +1000  (too small)
+Value of following behind: 0 (collision avoided = 0 penalty, 0 bonus)
+→ Agent settles in the zero-value equilibrium rather than risking overtake.
+
+NEXT: D44 — position_bonus 0.5 → 2.0 (4x) to make being ahead worth +4000/ep.
+
+SAVED FILES
+-----------
+rl/ppo_multi_agent_d43.zip — trained model
