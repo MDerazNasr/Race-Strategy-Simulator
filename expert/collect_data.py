@@ -404,6 +404,84 @@ def generate_dataset_pit_v2(
     return str(output_file)
 
 
+def generate_monaco_dataset(
+    num_episodes=50,
+    max_steps=6000,
+    output_path="bc/expert_data_monaco.npz",
+    cache_dir="fastf1_cache",
+):
+    """
+    Collect expert demonstrations on the Monaco circuit (D42).
+
+    Identical logic to generate_dataset() but uses the FastF1 Monaco track
+    instead of the synthetic oval.  The expert driver is track-agnostic and
+    works with any (N, 2) waypoint array.
+
+    Monaco notes:
+      - Circuit: ~3248 m per lap (vs oval ~314 m).
+      - Expert at max_speed=17.0 m/s, corner_factor=12.0.
+      - max_steps=6000 ≈ 4 laps at expert pace.
+      - Same 11D obs as the oval; 2D actions [throttle, steer].
+
+    Args:
+        num_episodes:  Number of episodes to collect.
+        max_steps:     Steps per episode (6000 for ~4 Monaco laps).
+        output_path:   Where to save the .npz (relative to project root).
+        cache_dir:     FastF1 cache directory.
+
+    Saves: bc/expert_data_monaco.npz with keys 'states' (N, 11) and 'actions' (N, 2).
+    """
+    from env.track import load_fastf1_track
+
+    track  = load_fastf1_track(2023, 'Monaco', 'Q', n_points=300, cache_dir=cache_dir)
+    env    = F1Env(track=track, max_steps=max_steps, multi_lap=True)
+    expert = ExpertDriver(track, max_speed=17.0, lookahead=8, corner_factor=12.0)
+
+    all_states  = []
+    all_actions = []
+
+    print(f"Collecting Monaco expert data ({num_episodes} episodes, max_steps={max_steps})...")
+
+    for episode in range(num_episodes):
+        obs, info = env.reset()
+        ep_states  = []
+        ep_actions = []
+
+        for step in range(max_steps):
+            expert_action = expert.get_action(env.car)
+            noisy = add_action_noise(expert_action, throttle_std=0.05, steer_std=0.05)
+
+            ep_states.append(obs.copy())
+            ep_actions.append(noisy)
+
+            obs, reward, terminated, truncated, info = env.step(noisy)
+
+            if abs(obs[2]) > 0.6:
+                ep_states.append(obs.copy())
+                ep_actions.append(noisy)
+
+            if terminated or truncated:
+                break
+
+        all_states.extend(ep_states)
+        all_actions.extend(ep_actions)
+        print(f"  Episode {episode+1}/{num_episodes}: {len(ep_states)} samples, "
+              f"laps={env.laps_completed}, speed={info['speed']:.1f} m/s")
+
+    all_states  = np.array(all_states,  dtype=np.float32)
+    all_actions = np.array(all_actions, dtype=np.float32)
+
+    output_file = Path(project_root) / output_path
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(output_file, states=all_states, actions=all_actions)
+
+    print(f"\nSaved Monaco dataset to {output_file}")
+    print(f"  Total samples: {len(all_states)}")
+    print(f"  States shape:  {all_states.shape}  (expected: (N, 11))")
+    print(f"  Actions shape: {all_actions.shape}  (expected: (N, 2))")
+    return str(output_file)
+
+
 if __name__ == "__main__":
     run_expert_lap()
 
