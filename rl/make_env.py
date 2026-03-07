@@ -222,6 +222,75 @@ def make_env_multi_agent():
     return env
 
 
+def make_env_monaco(max_steps=6000, cache_dir='fastf1_cache'):
+    """
+    Creates a Monaco (FastF1) environment instance for SB3 (D42).
+
+    WHAT'S DIFFERENT vs make_env():
+      - Real F1 circuit: Monaco 2023 qualifying fastest lap (~3248 m per lap).
+      - F1Env(track=monaco_track, max_steps=6000, multi_lap=True).
+      - Same 11D obs and 2D action as the standard env — no obs extension.
+      - Track loaded via FastF1 telemetry; cached after first download.
+
+    WHY MONACO?
+      The oval track has constant curvature — the three lookahead observations
+      [5]/[6]/[7] carry no information (every corner looks the same).
+      Monaco has wildly varying geometry: long straight → tight hairpin →
+      tunnel → chicane → swimming pool complex.  The curvature observations
+      become genuinely useful: the agent must brake early for the hairpin and
+      accelerate hard out of the tunnel.
+
+    TRAINING NOTE:
+      Train from scratch: expert data collection → BC warm start →
+      3-stage curriculum PPO.  The oval cv2 policy cannot transfer — its
+      weights were learned relative to the oval's coordinate system.
+
+    EPISODE LENGTH:
+      Monaco is ~3248 m. At 23 m/s average, 1 lap ≈ 141 s = 1410 steps.
+      max_steps=6000 ≈ 4.3 laps — comparable to the oval's 15-lap episodes
+      in terms of curriculum difficulty.
+
+    Used in: rl/train_ppo_monaco.py (d42)
+    """
+    from env.track import load_fastf1_track
+    track = load_fastf1_track(2023, 'Monaco', 'Q', n_points=300,
+                               cache_dir=cache_dir)
+    env = F1Env(multi_lap=True, track=track, max_steps=max_steps)
+    env = Monitor(env)
+    return env
+
+
+def make_env_multi_agent_d41():
+    """
+    Creates a competitive multi-agent environment for SB3 (D41).
+
+    WHAT'S DIFFERENT vs make_env_multi_agent():
+      - F1MultiAgentEnv(opp_max_speed=27.0) — opponent matches ego's top speed.
+      - D39 used opp_max_speed=22 m/s. The ego agent (cv2 lineage) cruises at
+        ~26.9 m/s, so raw speed advantage was 4.9 m/s — trivial to win.
+      - Raising the opponent to 27 m/s closes the shortcut: the ego can no
+        longer simply drive fast and lap the opponent.  It must use track_gap
+        and positional strategy to stay ahead or overtake.
+
+    STRATEGIC GOAL:
+      Force non-zero weight on dims 11 (track_gap) and 12 (opp_speed_norm).
+      In D39, both had learned weight = 0 because speed alone was sufficient.
+      With an equally-fast opponent, positional awareness becomes necessary.
+
+    TRAINING NOTE:
+      Warm-start from D39 (ppo_multi_agent_d39.zip, 13D obs, 2D action).
+      No obs extension needed — same 13D obs space, same action space.
+      Recreate rollout buffer (clean state after load).
+      ent_coef=0.01 from start — prevents log_std collapse (d38 lesson).
+
+    Used in: rl/train_ppo_multi_agent_d41.py (d41)
+    """
+    from env.f1_multi_env import F1MultiAgentEnv
+    env = F1MultiAgentEnv(opp_max_speed=27.0)
+    env = Monitor(env)
+    return env
+
+
 def make_env_pit_d23():
     """
     Creates a pit-stop environment with pit timing reward shaping (Week 5 / d23).

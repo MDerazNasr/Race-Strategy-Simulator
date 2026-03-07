@@ -29,7 +29,7 @@ from rl.rewards import RacingReward
 class F1Env(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 30} #info used for rendering
 
-    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False, pit_stops=False, forced_pit_interval=0, forced_pit_threshold=0.0, pit_timing_reward=False, voluntary_pit_reward=False, voluntary_pit_threshold=0.60, safety_car=False, sc_trigger_prob=0.003, sc_speed_limit=22.0, sc_duration_range=(80, 200), sc_cooldown_steps=300, sc_speed_penalty=2.0):
+    def __init__(self, render_mode=None, dt=0.1, multi_lap=False, tyre_degradation=False, pit_stops=False, forced_pit_interval=0, forced_pit_threshold=0.0, pit_timing_reward=False, voluntary_pit_reward=False, voluntary_pit_threshold=0.60, safety_car=False, sc_trigger_prob=0.003, sc_speed_limit=22.0, sc_duration_range=(80, 200), sc_cooldown_steps=300, sc_speed_penalty=2.0, track=None, max_steps=2000):
         super().__init__()
         self.dt = dt #dt = how much simulated time passes each step(). Same as in Car
         self.render_mode = render_mode #render_mode = you'll use this later if you draw stuff
@@ -137,7 +137,9 @@ class F1Env(gym.Env):
         self.forced_pit_threshold = forced_pit_threshold
 
         #Track
-        self.track = generate_oval_track() #you generate a simple circular-ish track (list of (x,y) points)
+        # If a pre-built track array is passed in (e.g. from load_fastf1_track),
+        # use it directly. Otherwise fall back to the synthetic oval.
+        self.track = track if track is not None else generate_oval_track()
 
         # ── Car ──────────────────────────────────────────────────────────
         # PART A: swapped kinematic Car → DynamicCar.
@@ -257,7 +259,7 @@ class F1Env(gym.Env):
             high = obs_high,
             dtype = np.float32
         )
-        self.max_steps = 2000  # stop episode after 2000 steps to avoid infinite episodes
+        self.max_steps = max_steps  # stop episode after this many steps (2000 for oval; 6000 for Monaco)
         self.step_count = 0
 
         # Reward function — modular so it can be swapped for curriculum learning later.
@@ -461,18 +463,26 @@ class F1Env(gym.Env):
         lateral_error  = signed_lateral_error(self.track, idx, x, y)
 
         # ── PART B: Three curvature samples ────────────────────────────
-        # curv_near: 5 waypoints ahead  — immediate turn entry
-        idx_near  = (idx +  5) % n_wpts
+        # Lookahead distances scale with waypoint density so the agent
+        # always sees ~0.5s / ~1.5s / ~3.0s ahead regardless of track length.
+        # oval-200: near=5, mid=15, far=30 (same as original hardcoded values)
+        # Monaco-300: near=7, mid=23, far=42 (11 m/pt → similar time horizons)
+        _near = max(1, n_wpts // 40)   # ~0.5 s horizon
+        _mid  = max(1, n_wpts // 13)   # ~1.5 s horizon
+        _far  = max(1, n_wpts //  7)   # ~3.0 s horizon
+
+        # curv_near: immediate turn entry
+        idx_near  = (idx + _near) % n_wpts
         angle_near, _ = track_tangent(self.track, idx_near)
         curv_near = normalize_angle(angle_near - track_angle)
 
-        # curv_mid: 15 waypoints ahead  — ~1.5 s planning horizon
-        idx_mid   = (idx + 15) % n_wpts
+        # curv_mid: ~1.5 s planning horizon
+        idx_mid   = (idx + _mid) % n_wpts
         angle_mid, _ = track_tangent(self.track, idx_mid)
         curv_mid  = normalize_angle(angle_mid - track_angle)
 
-        # curv_far: 30 waypoints ahead  — ~3.0 s planning horizon
-        idx_far   = (idx + 30) % n_wpts
+        # curv_far: ~3.0 s planning horizon
+        idx_far   = (idx + _far) % n_wpts
         angle_far, _ = track_tangent(self.track, idx_far)
         curv_far  = normalize_angle(angle_far - track_angle)
 
@@ -640,7 +650,8 @@ class F1Env(gym.Env):
         # sources now agree on the lap count.  evaluate.py reads env.laps_completed
         # directly instead of recomputing it.
         curr_idx = self._track_idx
-        if self._prev_track_idx > 150 and curr_idx < 50:
+        _N = len(self.track)
+        if self._prev_track_idx > (_N * 3 // 4) and curr_idx < (_N // 4):
             self.laps_completed += 1
             lap_bonus = self.lap_bonus   # +100.0 one-time bonus
         else:
