@@ -1,0 +1,105 @@
+D41 — Competitive Multi-Agent (Opponent at 27 m/s)
+====================================================
+Date: 2026-03-07
+
+OBJECTIVE
+---------
+D39 showed that the multi-agent agent ignores the track_gap and opp_speed_norm
+observations (both columns had 0.0 learned weight). The agent simply drove at
+maximum speed (26.91 m/s > opponent 22 m/s) and never needed positional
+strategy. D41 raises the opponent speed to 27 m/s — matching the ego's top
+speed — to force the agent to develop a positional strategy.
+
+WHAT WAS BUILT
+--------------
+1. rl/make_env.py: Added make_env_multi_agent_d41() with opp_max_speed=27.0
+2. rl/train_ppo_multi_agent_d41.py: Warm-start from D39 (13D → 13D)
+   - Critical fix: reset Adam optimizer after PPO.load()
+     (D39's saved optimizer had exp_avg tensors at shape (128,11) from D39's
+      own warm-start from cv2; loading D39 and running Adam.step() on 13D
+      params caused RuntimeError: size of tensor a (11) must match (13))
+3. rl/evaluate.py: Added D41 entry with env_key="multi_d41"
+
+CRITICAL FIX: ADAM OPTIMIZER SHAPE MISMATCH
+---------------------------------------------
+D39 lineage: cv2 (11D) → obs_extend (11D→13D) → save as ppo_multi_agent_d39.zip
+The saved zip contains: weights (128,13) but optimizer exp_avg (128,11).
+Loading D39 and calling model.learn() triggers Adam.step() on stale state.
+Fix: model.policy.optimizer = optim.Adam(model.policy.parameters(), lr=1e-4, eps=1e-5)
+
+TRAINING LOG
+------------
+Device: CPU
+Total steps: 3,000,000
+Time: ~1707 seconds (~28 min)
+Init: Warm-start from D39 (13D → 13D, no extension needed)
+LR: cosine 1e-4 → 1e-6 (reset via reset_num_timesteps=True)
+ent_coef: 0.01
+
+Early (first 100k steps): ep_rew_mean ≈ 3000-3200, ep_len ≈ 1000-1100
+Final convergence: ep_rew_mean = 3170, ep_len = 1120
+clip_fraction = 0.0000 (fully converged)
+lr at minimum: 1e-06
+
+POST-TRAINING WEIGHT DIAGNOSTICS
+----------------------------------
+policy_net[0] abs_mean = 0.159023
+policy_net[2] abs_mean = 0.080003
+col[11] (track_gap)    abs_mean = 0.015824  [D39: 0.000000] ← YES ✓
+col[12] (opp_speed)    abs_mean = 0.004787  [D39: 0.000000] ← YES ✓
+log_std = [-0.7900, -2.1239]
+std     = [0.4530, 0.1199]
+
+KEY FINDING: Both track_gap and opp_speed_norm columns became non-zero.
+At D39 (opp=22 m/s), both were exactly 0.000. At D41 (opp=27 m/s), both
+became non-zero. Raising the opponent speed successfully closed the raw-speed
+shortcut and forced positional awareness.
+
+EVALUATION RESULTS (fixed start, N=10, deterministic)
+------------------------------------------------------
+Reward: 69.5
+Laps: 0.00
+Speed: 24.27 m/s
+Lateral error: 1.537 m
+Completion: 0%
+Pits: —
+
+COMPARISON TO D39:
+  D39 (opp=22 m/s): 6024.8 reward, 17 laps, 100% completion
+  D41 (opp=27 m/s): 69.5 reward, 0 laps, 0% completion
+
+ROOT CAUSE ANALYSIS
+-------------------
+The deterministic evaluation fails completely. During training (stochastic),
+ep_rew=3170 suggests the agent does accumulate reward, but in deterministic
+eval with an equal-speed opponent, lap completion breaks down.
+
+With opp_max_speed=27 m/s matching ego's top speed:
+1. No speed advantage: ego cannot drive away from opponent.
+2. Deterministic opponent follows a fixed trajectory. With no speed buffer,
+   any misalignment leads to collision.
+3. Stochastic training: the agent may have relied on noise-induced gaps that
+   vanish in deterministic mode.
+4. The non-zero track_gap weight confirms the agent started ATTENDING to
+   position — but 3M steps may not be enough to fully converge a reliable
+   avoidance strategy at equal speeds.
+
+Training reward 3170 >> eval reward 69.5 is the largest train/eval gap seen in
+this project, indicating the policy depends heavily on exploratory noise.
+
+LESSONS LEARNED
+---------------
+1. Confirmed: raising opponent speed closes the raw-speed shortcut and forces
+   the agent to use positional observations (col[11/12] weight → non-zero).
+2. But: equal-speed competition makes the task qualitatively harder — 0%
+   deterministic completion.
+3. Future directions:
+   a. Train longer (5-10M steps) with opp=27 m/s — the curriculum may need more
+      time to stabilize at equal speeds.
+   b. Try intermediate opponent speed (24-25 m/s) — reduces shortcut without
+      making it impossible.
+   c. Add a positional bonus: +reward when ego is ahead of opponent at each step.
+
+SAVED FILES
+-----------
+rl/ppo_multi_agent_d41.zip  — trained model

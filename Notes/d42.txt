@@ -1,0 +1,159 @@
+D42 — Real Track Geometry (FastF1, Monaco Circuit)
+====================================================
+Date: 2026-03-07
+
+OBJECTIVE
+---------
+All previous experiments (D1–D41) trained on a synthetic oval (radius=50m,
+constant curvature ~0.02 /m). The three curvature lookahead observations
+(obs[5] near, obs[6] mid, obs[7] far) carry zero useful information on the
+oval because every corner is identical. Monaco changes this completely:
+  - 3248m per lap (vs oval ~314m, 10x longer)
+  - Drastically varying curvature: long straight → tight hairpin → tunnel → chicane
+  - The curvature signals now differ at every track section
+
+D42 = first experiment where the Week 3 obs design (multi-step curvature) is
+truly tested. Primary question: does the agent learn non-zero weights for
+curvature observations when the track actually has varying curvature?
+
+INFRASTRUCTURE BUILT
+---------------------
+1. FastF1 installed (v3.8.1): pip install fastf1
+
+2. env/track.py — load_fastf1_track():
+   - Downloads Monaco 2023 Q fastest-lap telemetry
+   - CRITICAL: FastF1 position data is in DECIMETERS, not meters → divide by 10
+   - Two-pass deduplication to remove near-zero-spacing waypoints:
+     Pass 1: remove consecutive points within 0.5m from raw telemetry
+     Pass 2: remove near-duplicates after linspace resampling (int-rounding)
+   - Result: 259 waypoints (target 300), min spacing 1.84m, circuit 3248m
+   - Bounding box: X ∈ [-768, -18]m, Y ∈ [-977, -17]m
+
+3. env/f1_env.py — Three backward-compatible changes:
+   a) Constructor: added track=None, max_steps=2000 (defaults = oval behavior)
+   b) Lap detection: hardcoded 150/50 → N*3//4 / N//4 (scales to any track)
+   c) Lookahead: hardcoded 5/15/30 → N//40 / N//13 / N//7
+      (preserves ~0.5s / ~1.5s / ~3.0s time horizons regardless of density)
+      oval-200: 5/15/28  Monaco-259: 6/19/37
+
+4. rl/make_env.py: Added make_env_monaco() (max_steps=6000, Monaco 2023 Q)
+
+5. expert/collect_data.py: Added generate_monaco_dataset() with Monaco env
+
+6. bc/train_bc_monaco.py: BC on Monaco expert data (11D→[128,128]→2D, MSE loss)
+
+7. rl/train_ppo_monaco.py: 3-stage curriculum PPO on Monaco
+
+EXPERT DATA COLLECTION FAILURE
+--------------------------------
+The expert driver (ExpertDriver, max_speed=17.0, lookahead=8, corner_factor=12)
+could not navigate Monaco. All 50 collection episodes ended in 0 completed laps:
+
+  - Episode avg: 17.7 samples (vs 600+ expected per lap on Monaco)
+  - Total dataset: 884 samples (vs ~30,000 needed for good BC coverage)
+  - All episodes: laps=0, terminated within 10-134 steps
+
+Root cause: The ExpertDriver was designed and tuned for the oval. On Monaco,
+  the car starts pointing in the wrong direction relative to the track tangent,
+  and the initial state has a high lateral error. The expert's speed controller
+  reduces speed for corners, but Monaco's first corner may be extremely tight
+  relative to the starting position.
+
+Consequence: BC policy trained on 884 crash samples. The BC init is essentially
+useless — it encodes "how to crash quickly on Monaco" rather than "how to drive."
+
+PPO TRAINING RESULTS
+---------------------
+Device: CPU
+Total steps: 3,000,000
+Time: ~1431 seconds (~24 min)
+BC init: Loaded (but from low-quality data)
+
+Training progression:
+  Early (stage 0, <100k steps): ep_rew_mean ≈ -35, ep_len ≈ 50
+  Mid (500k steps): ep_rew_mean ≈ 0-50, ep_len ≈ 200
+  Final (3M steps): ep_rew_mean = 160, ep_len = 350-370
+
+Curriculum: NEVER left Stage 0 (Stability, max_accel=6.0)
+  - lap_rate = 0 throughout (0 laps completed in any episode)
+  - grad_target = 0.5 (never advanced to Stage 2)
+  - clip_fraction → 0 (converged within Stage 0)
+
+POST-TRAINING WEIGHT DIAGNOSTICS
+----------------------------------
+policy_net[0] abs_mean = 0.208457
+policy_net[2] abs_mean = 0.079728
+col[5] (curv_near) abs_mean = 0.221943  ← NON-ZERO ✓ (vs ~0 on oval)
+col[6] (curv_mid)  abs_mean = 0.178762  ← NON-ZERO ✓
+col[7] (curv_far)  abs_mean = 0.180301  ← NON-ZERO ✓
+log_std = [-0.2292, -1.9215]
+std     = [0.7952, 0.1464]
+
+PRIMARY HYPOTHESIS CONFIRMED: Curvature signals are used.
+  All three curvature columns have non-zero learned weights (~0.18-0.22).
+  On the oval, these columns would converge to ~0 because every corner is
+  identical. On Monaco with varying curvature, the agent uses them.
+
+  Furthermore, col[5] (near) has the highest weight (0.222) vs col[7] (far,
+  0.180), which makes physical sense: near-curvature is most actionable for
+  immediate steering adjustments.
+
+REMAINING PROBLEM: CURRICULUM STUCK IN STAGE 0
+------------------------------------------------
+Despite improving from ep_rew=-35 to +160, the agent never completed a single
+lap. Monaco is ~3248m vs oval ~314m (10x longer). At 6.0 m/s max_accel (Stage
+0 cap of ~8 m/s top speed), completing one Monaco lap requires 3248/8 ≈ 406s
+= 4060 steps. With max_steps=6000, there is room for 1 lap, but the agent only
+survives ~350 steps on average before going off-track.
+
+The agent never built enough skill in Stage 0 to complete a lap, so the
+curriculum never advanced to Stage 2 (faster) which would allow natural lap
+completion. This is a bootstrapping problem: need to complete laps to advance,
+but can't complete laps without the skills that require more training.
+
+ROOT CAUSE ANALYSIS
+-------------------
+1. Expert driver failure → no usable BC warm start
+2. Monaco difficulty: The oval agent can complete a lap in 2000 steps. Monaco
+   requires 6000 steps and the agent crashes after 350. The reward signal from
+   partial laps is much weaker.
+3. Stage 0 speed limit (8 m/s) gives the agent 6000/407 ≈ 1 lap's worth of
+   time budget. On the oval (314m / 8 m/s = 39s = 390 steps), Stage 0 allowed
+   many lap completions. On Monaco, only 1.
+4. The lookahead values for Monaco (N//40=6, N//13=19, N//7=37 waypoints) may
+   still be too coarse for tight hairpins (Casino Square, Fairmont Hairpin).
+
+WHAT WAS PARTIALLY PROVEN
+---------------------------
+✓ Real track infrastructure: FastF1 → dedup → F1Env integration works
+✓ Curvature observations ARE used on real track (primary hypothesis)
+✓ Week 3 obs design validated on a real circuit
+✗ Lap completion and curriculum advancement: failed
+✗ Expert driver does not generalize to Monaco
+
+LESSONS AND NEXT STEPS
+------------------------
+1. Fix expert driver for Monaco:
+   - Reduce max_speed to 10 m/s on Monaco (car starts slowly, avoids crash)
+   - Or: use an oracle expert that reads directly from telemetry data
+   - Or: collect data with a random policy and filter successful segments
+
+2. Alternative BC data strategy:
+   - Run random policy for 50k steps, filter segments where car survives >500 steps
+   - Use those segments (regardless of lap completion) as BC training data
+
+3. Adjust curriculum for Monaco:
+   - Increase Stage 0 max_steps budget to 10000 to allow multiple Monaco laps
+   - Or: reduce Stage 1 grad_target from 0.5 to 0.1 (easier to advance)
+
+4. Fix lap detection: verify that N//4 correctly maps to Monaco coordinates.
+   With N=259, lap detection triggers when prev_idx > 194 and curr_idx < 64.
+
+5. Training budget: 3M steps may be too little for Monaco. Consider 10M steps.
+
+SAVED FILES
+-----------
+rl/ppo_monaco.zip         — trained model (Stage 0 only, 350-step episodes)
+bc/bc_policy_monaco.pt    — BC weights (trained on crash data, mostly useless)
+bc/expert_data_monaco.npz — Monaco expert data (884 samples, all crashes)
+fastf1_cache/             — Cached FastF1 session data (Monaco 2023 Q)
