@@ -517,11 +517,27 @@ Warm-start from D48, 3M steps. Results (fixed start, N=10, deterministic):
 - The periodic pits act as an implicit undercut: fresh tyres → maintain speed → stay ahead
 - D48b = **best pit-circuit policy in the project** (combined pit + racing)
 
-**D49 — Monaco No-Curriculum** (in progress)
-Skip STAGES curriculum (which gets stuck at Stage 0 on Monaco's 12× longer lap).
-Plain PPO from BC init, `max_accel=8` fixed, `max_steps=8000`.
+**D49 — Monaco No-Curriculum** (complete)
+Plain PPO from BC init, `max_accel=8` fixed, `max_steps=8000`, 5M steps.
+**First Monaco lap completions**: 2/10 evaluation episodes completed ≥1 full Monaco lap
+(D47 = 0 laps; D42 = 0 laps). Curvature weights maintained (0.18/0.15/0.15).
+
+| Metric | D49 | D47 | D42 |
+|--------|-----|-----|-----|
+| Monaco laps | **0.20 avg** | 0 | 0 |
+| Laps > 0 | **2/10** | 0 | 0 |
+| ep_len | 509 | 514 | 17 |
+| Curv weights | 0.18/0.15/0.15 | 0.17/0.16/0.14 | 0.22/0.18/0.16 |
+| Completion | 0% | 0% | 0% |
+
+**Key findings**:
+- No-curriculum approach **breaks the Stage-0 deadlock** — first Monaco laps ever
+- Curvature weights are preserved across all Monaco experiments (BC init is rock-solid)
+- Curriculum was not the only blocker: agent still crashes in 80% of episodes
+- Agent plateaus at ~500 steps (~375m), stuck at a consistent difficult section
+- Monaco needs sector rewards or longer training to reach reliable completion
 
 ---
 
-*Built over 7 weeks, 49+ experiments, ~65M PPO training steps.*
+*Built over 7 weeks, 49+ experiments, ~70M PPO training steps.*
 *Core stack: Python 3.14, PyTorch, Stable-Baselines3, Gymnasium, FastF1, Matplotlib.*

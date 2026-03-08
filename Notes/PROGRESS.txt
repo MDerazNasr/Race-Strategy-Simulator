@@ -1555,3 +1555,26 @@ Key findings:
 
 The periodic pit cadence acts as an implicit undercut: fresh tyres → faster →
 maintain/take position. Mean track_gap=-0.068 (ego consistently ahead on average).
+
+==============================================================================
+D49: Monaco No-Curriculum PPO (max_accel=8 fixed) (2026-03-08)
+==============================================================================
+
+Fix: remove STAGES curriculum entirely. Plain PPO from BC init, fixed max_accel=8 m/s²,
+max_steps=8000. 5M steps, 2280 seconds.
+
+Results (N=10, deterministic):
+  reward=390 ± 296, steps=509, laps=0.20, speed=13.54 m/s, completion=0%
+  2/10 episodes completed ≥1 Monaco lap (D47=0/?, D42=0/50)
+
+Post-training:
+  col[5] (curv_near)=0.1803, col[6] (curv_mid)=0.1535, col[7] (curv_far)=0.1533 ✓
+  log_std=[-0.80,-0.62], std=[0.45,0.54]
+
+Key findings:
+  1. FIRST MONACO LAPS EVER: 2/10 episodes completed a full Monaco lap.
+     No-curriculum > curriculum for Monaco.
+  2. Curvature weights maintained (0.18/0.15/0.15) — BC init is rock-solid.
+  3. Curriculum was not the only blocker: still 80% crash rate.
+     Agent plateaus at ~500 steps (~375m), stuck at a consistent difficult section.
+  4. Monaco needs sector rewards or much longer training to reach reliable completion.

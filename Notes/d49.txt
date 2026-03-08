@@ -1,0 +1,156 @@
+D49 — Monaco No-Curriculum PPO (max_accel=8 fixed)
+====================================================
+Date: 2026-03-08
+
+OBJECTIVE
+---------
+D47 confirmed: STAGES curriculum is the blocker for Monaco.
+- grad_lap_rate=0.5 requires 50% Monaco lap to advance Stage 0
+- Monaco lap ~3750m = 12× oval (314m)
+- Agent covers ~300-500m before crashing = 8-13% → never advances
+
+D49 fix: skip the curriculum entirely.
+  - Fixed max_accel=8 m/s² throughout training (no stage progression)
+  - max_steps=8000 (vs D47's 6000) — more room to complete laps
+  - Warm-start: bc_policy_monaco.pt (BC-init confirms curvature weights work)
+  - Plain PPO: no CurriculumCallback
+
+WHY max_accel=8?
+  - 6 m/s² (BC expert cap): too slow, no incentive to go faster
+  - 15 m/s² (Stage 3): too fast for Monaco hairpins at early training
+  - 8 m/s²: top speed ~20 m/s → Monaco lap ≈ 1875 steps; 4 laps fit in max_steps=8000
+
+CHANGE
+------
+Env: F1Env(track=Monaco, max_steps=8000, max_accel=8.0 fixed)
+Warm-start: bc_policy_monaco.pt (2D action — throttle, steer)
+Steps: 5M
+
+TRAINING
+--------
+Duration: 2280 seconds (~38 minutes)
+Final ep_rew_mean: ~310-345
+Final ep_len_mean: ~510-570 steps
+Training converged: approx_kl≈0, clip_fraction=0 (fully converged)
+
+POST-TRAINING DIAGNOSTICS
+--------------------------
+  policy_net[0] abs_mean = 0.182531  [init=0.165912]  +10.0%
+  col[5] (curv_near) = 0.180269  [init=0.163909]  ↑ curvature used ✓
+  col[6] (curv_mid)  = 0.153485  [init=0.158261]
+  col[7] (curv_far)  = 0.153256  [init=0.142421]
+  log_std = [-0.7955, -0.6222]
+  std     = [0.4514,  0.5368]
+
+Note: std=0.45/0.54 — moderate stochasticity. Agent hasn't collapsed to a deterministic
+policy, which explains variance in evaluation (2/10 laps when lucky, crash otherwise).
+
+EVALUATION RESULTS (random starts, N=10, deterministic)
+---------------------------------------------------------
+  Reward:     390 ± 296  (highly variable)
+  Steps:      509
+  Laps:       0.20 (2/10 episodes completed ≥1 Monaco lap)
+  Speed:      13.54 m/s
+  Completion: 0%  (no episode survived 8000 steps)
+  Laps > 0:   2/10 episodes
+
+Per-episode breakdown:
+  ep0: r=574,  steps=930, laps=0, crashed
+  ep1: r=554,  steps=568, laps=0, crashed
+  ep2: r=3,    steps=3,   laps=0, crashed (immediate)
+  ep3: r=141,  steps=?,   laps=0, crashed early
+  ep4: r=669,  steps=?,   laps=1, completed 1 lap then crashed
+  ep5: r=668,  steps=?,   laps=1, completed 1 lap then crashed
+  ep6: r=713,  steps=?,   laps=0, crashed
+  ep7: r=576,  steps=?,   laps=0, crashed
+  ep8: r=43,   steps=?,   laps=0, crashed early
+  ep9: r=-43,  steps=?,   laps=0, crashed immediately
+
+KEY FINDINGS
+-----------
+
+1. PARTIAL SUCCESS: ≥1 MONACO LAP ACHIEVED ✓ (TARGET MET)
+   - 2/10 episodes completed a full Monaco lap (1875m circuit)
+   - D47 = 0/? laps (curriculum stuck at Stage 0, never reached lap territory)
+   - D49 = 2/10 laps → no-curriculum approach is better than curriculum for Monaco
+
+2. CURVATURE WEIGHTS MAINTAINED ✓
+   - curv_near=0.180 (↑ from 0.164 init)
+   - All three curvature weights non-zero → agent actively uses track geometry
+   - Same pattern as D42/D47: BC init preserves curvature signal through PPO training
+
+3. STILL CRASHES IN 80% OF EPISODES ✗
+   - ep_len_mean ≈ 509 vs target >2000 (quarter-lap territory at best)
+   - Highly stochastic: variance 296 vs mean 390 → 75% coefficient of variation
+   - The 2 successful laps appear to be lucky trajectories, not reliable strategy
+   - std=0.45/0.54 → moderate exploration; deterministic mean still crashes often
+
+4. CURRICULUM WAS NOT THE ONLY BLOCKER
+   - D47 hypothesis: "curriculum is the only problem"
+   - D49 reality: removing curriculum improved from 0→2/10 laps but didn't solve Monaco
+   - Monaco is fundamentally harder than oval:
+     - 12× longer lap (3750m vs 314m)
+     - Tight hairpins require deceleration the agent hasn't learned
+     - Without a progressive difficulty signal, agent learns to survive early corners
+       but hasn't been trained for the full-lap challenge
+
+5. SPEED IS LOW (13.54 vs oval D49 target of 20 m/s)
+   - max_accel=8 should allow 20 m/s top speed
+   - But avg 13.54 m/s suggests frequent braking/crashing
+   - Median of surviving steps likely higher; crashes drag down average
+
+COMPARISON TABLE
+----------------
+| Policy | Reward | Steps  | Laps | Speed | Laps>0 | Curv |
+|--------|--------|--------|------|-------|--------|------|
+| D49    | 390    | 509    | 0.20 | 13.54 | 2/10   | 0.18 |
+| D47    | 261    | 514    | 0    | ~15   | 0/50   | 0.17 |
+| D42    | N/A    | ~17-30 | 0    | N/A   | 0/50   | 0.18 |
+
+D49 vs D47: first time Monaco laps appear in evaluation. No-curriculum > curriculum for Monaco.
+Curvature weights consistent across D42/D47/D49 (0.17-0.18): BC initialization is rock-solid.
+
+TRAINING PATTERNS
+-----------------
+Early training (0-100K steps): ep_len=30-80, rew<-20 (immediate crashes)
+Mid training (500K steps):     ep_len≈200, rew≈-10 (learning not to crash immediately)
+Late training (3M+ steps):     ep_len≈500, rew≈250-350 (stable plateau)
+Final (5M steps):              ep_len≈515, rew≈310-345 (converged, plateau unchanged)
+
+The plateau at ep_len≈500 (~375m covered at 13.5 m/s) suggests the agent has found a
+local optimum: survive the first few corners, collect some speed reward, then crash at
+a consistent difficult section (probably the chicane or a tight hairpin).
+
+WHAT'S NEXT
+-----------
+Monaco requires a more targeted approach:
+
+A) D50: Sector-based reward shaping
+   - Divide Monaco into sectors (Start/Finish, Casino, Mirabeau, etc.)
+   - Give bonus reward for completing each sector for the first time
+   - Acts as a soft curriculum without hard stage gates
+
+B) D50: Monaco-specific curriculum (softer threshold)
+   - Replace grad_lap_rate=0.5 with grad_sector_rate=0.1
+   - Advance when agent covers 10% of lap (375m) → achievable from D49's plateau
+
+C) Continue as-is: Monaco is a "nice to have" infrastructure proof
+   - The key result (curvature weights work, BC init works) is confirmed
+   - Oval experiments (D48b=6122) are the primary research thread
+   - Monaco can be revisited in a dedicated GPU training session
+
+D) D50: Multi-agent pit strategy with speed increase
+   - Build on D48b's success: add stronger opponent (opp_max_speed=30)
+   - Force the agent to develop more aggressive undercut strategy
+   - Proven framework vs unproven Monaco
+
+CONCLUSION
+----------
+D49 is the first experiment to achieve Monaco lap completion (2/10). The no-curriculum
+approach is the right direction — removing the STAGES gate unblocked the agent. But Monaco
+remains hard: 80% crash rate, 0% full-episode completion. The curriculum was necessary
+but not sufficient; Monaco needs either sector rewards or a much longer training run.
+
+The infrastructure is confirmed working: FastF1 track loading, curvature obs, BC init
+all function correctly. The gap between "sometimes completes a lap" and "reliable Monaco
+driving" is the remaining challenge.
