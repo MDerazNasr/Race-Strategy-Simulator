@@ -56,16 +56,17 @@ D46 achieves the project's highest reward (7943) while also demonstrating genuin
 
 ## Visualizations
 
-### Policy Progress — All 40 Experiments
+### Policy Progress — All 46 Experiments
 
 ![Progress Dashboard](plots/progress_dashboard.png)
 
-Every experiment from D10 to D40, color-coded by phase:
+Every experiment from D10 to D46, color-coded by phase:
 - **Blue** — driving foundation (BC → PPO → curriculum)
 - **Orange** — pit stop campaign (20 experiments to get 3 voluntary pits)
 - **Green** — advanced: multi-agent and safety car
+- **Purple** — positional strategy (D41–D46)
 
-Key moments: first voluntary pit stop (D21), PitAwarePolicy architectural fix (D32), full unfreeze → 3 pits (D36), speed record at 26.9 m/s (cv2).
+Key moments: first voluntary pit stop (D21), PitAwarePolicy architectural fix (D32), full unfreeze → 3 pits (D36), speed record at 26.9 m/s (cv2), D46 new project best at 7943 reward.
 
 ---
 
@@ -78,7 +79,7 @@ Three panels from a single fixed-start episode of the best pit policy:
 - **Middle**: Tyre life — degradation curve resets to 1.0 at each pit entry
 - **Bottom**: Cumulative reward — −200 dips at each pit, recovered by faster lap times
 
-Three pit stops at steps 520, 1037, 1554. 15 laps completed. 4377 total reward.
+Three pit stops at steps 520, 1039, 1559. 15 laps completed. 4376 total reward.
 
 ---
 
@@ -90,7 +91,7 @@ Four agents racing simultaneously on the same oval:
 - **Top-left (green)** — Expert driver: slow and steady, 17 m/s
 - **Top-right (blue)** — cv2 speed champion: fastest lap times, 26.9 m/s, no pits
 - **Bottom-left (orange)** — D37 pit strategy: panel flashes red on each pit stop
-- **Bottom-right (purple + orange)** — D39 multi-agent: ego (purple) vs ExpertDriver opponent (orange)
+- **Bottom-right (purple + orange)** — D46 multi-agent champion: ego (purple) vs faster opponent at 25 m/s (orange)
 
 ---
 
