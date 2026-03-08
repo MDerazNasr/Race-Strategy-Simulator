@@ -365,6 +365,44 @@ def make_env_multi_agent_d44():
     return env
 
 
+def make_env_multi_pit():
+    """
+    Creates a pit+multi-agent environment instance for SB3 (D48).
+
+    WHAT'S DIFFERENT vs make_env_pit_d30() and make_env_multi_agent():
+      - F1MultiAgentPitEnv: ego with tyre degradation + pit stops vs ExpertDriver.
+      - Observation is 14D: [11D standard] + [tyre_life] + [track_gap] + [opp_speed_norm].
+        tyre_life is at dim 11 — same index as D32–D37 — so PitAwarePolicy works unchanged.
+      - Action space is 3D: [throttle, steer, pit_signal] (same as D37).
+      - Opponent: ExpertDriver at 25 m/s, no tyre degradation.
+      - Additional reward terms vs make_env_pit_d30():
+          position_bonus   = +2.0/step when ego ahead (proven in D44/D46)
+          overtake_bonus   = +200 one-time on overtake
+          collision_penalty= -0.5/step within 3m
+      - Pit rewards (same as D37 / make_env_pit_d30):
+          pit_penalty      = -200
+          voluntary_pit_bonus = +300 when tyre_life < 0.60 and agent pits voluntarily
+
+    STRATEGIC GOAL:
+      Agent must learn BOTH pit timing (D37 lesson: pit every ~600 steps)
+      AND positional strategy (D46 lesson: actively use track_gap to stay ahead).
+      Ideally: undercut — pit early relative to opponent's pace to take position.
+
+    TRAINING NOTE:
+      Warm-start from D37 (ppo_pit_v4_d37.zip, 12D, 3D action, PitAwarePolicy).
+      extend_obs_dim(model, 12, 14) zero-pads dims 12–13.
+      PitAwarePolicy.TYRE_LIFE_OBS_IDX = 11 → reads tyre_life correctly.
+      Fix obs bounds: dim 12 (track_gap) low=-1.0.
+      Recreate rollout buffer after extension.
+
+    Used in: rl/train_ppo_multi_pit.py (d48)
+    """
+    from env.f1_multi_pit_env import F1MultiAgentPitEnv
+    env = F1MultiAgentPitEnv()
+    env = Monitor(env)
+    return env
+
+
 def make_env_pit_d23():
     """
     Creates a pit-stop environment with pit timing reward shaping (Week 5 / d23).

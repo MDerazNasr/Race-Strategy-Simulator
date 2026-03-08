@@ -419,7 +419,7 @@ def generate_monaco_dataset(
 
     Monaco notes:
       - Circuit: ~3248 m per lap (vs oval ~314 m).
-      - Expert at max_speed=17.0 m/s, corner_factor=12.0.
+      - Expert at max_speed=6.0 m/s, corner_factor=3.0, lookahead=1 (D47 fix).
       - max_steps=6000 ≈ 4 laps at expert pace.
       - Same 11D obs as the oval; 2D actions [throttle, steer].
 
@@ -435,7 +435,12 @@ def generate_monaco_dataset(
 
     track  = load_fastf1_track(2023, 'Monaco', 'Q', n_points=300, cache_dir=cache_dir)
     env    = F1Env(track=track, max_steps=max_steps, multi_lap=True)
-    expert = ExpertDriver(track, max_speed=17.0, lookahead=8, corner_factor=12.0)
+    # D47 fix: short lookahead + slow speed so the expert tracks the centerline closely.
+    # Old (D42): max_speed=17.0, lookahead=8, corner_factor=12.0 → avg 17 steps, 884 samples.
+    # New (D47): max_speed=6.0, lookahead=1, corner_factor=3.0 → avg ~600 steps per episode.
+    #   lookahead=1 (12.5m ahead) forces aggressive centering correction each step.
+    #   This is the key fix: large lookahead (62.5m) understeers on Monaco's curves.
+    expert = ExpertDriver(track, max_speed=6.0, lookahead=1, corner_factor=3.0)
 
     all_states  = []
     all_actions = []

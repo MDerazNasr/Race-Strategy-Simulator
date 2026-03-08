@@ -1,7 +1,7 @@
 # F1 Race Strategy Simulator — Project Report
 
-> A 6-week, 40-experiment journey: from a rule-based expert to a pit-stopping,
-> multi-agent RL racing agent that exceeds human-designed baselines by 55%.
+> A 7-week, 46-experiment journey: from a rule-based expert to a positional-strategy
+> multi-agent RL racing agent with genuine overtaking behavior — 173% above the expert baseline.
 
 ---
 
@@ -13,8 +13,9 @@ reinforcement learning. The final system handles:
 
 - **Dynamic tyre physics** (Pacejka magic formula, grip degradation)
 - **Pit stop strategy** (timing entries to maximise lap count)
-- **Multi-agent racing** (overtaking an ExpertDriver opponent)
+- **Multi-agent racing** with genuine positional awareness (overtaking, track-gap sensing)
 - **Safety car periods** (speed-limited yellow-flag windows)
+- **Real track geometry** (FastF1 Monaco telemetry, varying curvature)
 
 All training uses **Proximal Policy Optimization (PPO)** from Stable-Baselines3,
 warm-started via Behavioral Cloning (BC) to avoid the cold-start problem.
@@ -29,6 +30,8 @@ Week 3    Dynamic physics + Curriculum          (d12–d14)
 Week 4    Speed record: 26.9 m/s               (d15–d17)
 Week 5    Pit stop strategy (20 experiments)   (d18–d38)
 Week 6    Multi-agent + Safety car             (d39–d40)
+Week 7    Positional strategy (D41–D46)        opp speed + reward shaping → col[11] ≠ 0
+(bonus)   Real track geometry (D42)            FastF1 Monaco — curvature hypothesis confirmed
 ```
 
 ---
@@ -54,7 +57,7 @@ DynamicCar parameters (F1-scale):
 
 Tyre force: `F_y = D · sin(C · arctan(B · α))` — linear at small slip, saturates at peak µ.
 
-### Observation Space (11D → 12D → 13D)
+### Observation Space (11D → 12D → 13D → 14D)
 
 | Dim | Feature | Added |
 |-----|---------|-------|
@@ -70,7 +73,11 @@ Tyre force: `F_y = D · sin(C · arctan(B · α))` — linear at small slip, sat
 | 9 | v_y / 5.0 (lateral slide) | Week 3 |
 | 10 | r / 2.0 (yaw rate) | Week 3 |
 | 11 | tyre\_life ∈ [0, 1] | Week 5 (pit) |
-| 12 | sc\_active ∈ {0, 1} | Week 6 (SC) |
+| 12 | track\_gap ∈ [−1, 1] | Week 6 (multi-agent) |
+| 13 | opp\_speed\_norm ∈ [0, 1] | Week 6 (multi-agent) |
+
+Note: D40 (safety car) uses `[11]=tyre_life, [12]=sc_active` (13D).
+D48 (pit+multi-agent) uses 14D: `[11]=tyre_life, [12]=track_gap, [13]=opp_speed_norm`.
 
 ### Action Space (2D → 3D)
 `[throttle, steer]` for standard driving; `[throttle, steer, pit_signal]` for pit environments.
@@ -268,27 +275,98 @@ or by adding a green-flag speed bonus that makes static slow driving suboptimal.
 
 ---
 
+## Positional Strategy (D41–D46)
+
+### The Follow Equilibrium Problem
+
+Raising opponent speed to 27 m/s (D41) made track_gap weight non-zero (0.016) but
+produced 0% lap completion — too hard. At 25 m/s (D43), the agent found a new local
+optimum: **match the opponent's speed exactly** and follow behind it. The position_bonus
+of +0.5/step made being ahead worth only +1000/episode — not worth the risk of overtaking.
+
+### Closing the Shortcut: Reward Shaping
+
+Raising `position_bonus` from 0.5 → 2.0/step (D44) made being ahead worth +4000/episode
+— 4× the old value. The follow equilibrium broke immediately: track_gap weight surged +155%
+(0.022 → 0.055) and deterministic speed jumped from 24.36 → 26.91 m/s.
+
+Subsequent fine-tuning improved lap completion (3 → 8 → 17 laps):
+
+| Experiment | Opp speed | Pos bonus | col[11] weight | Reward | Laps |
+|------------|-----------|-----------|---------------|--------|------|
+| D39 | 22 m/s | 0.5 | 0.000 | 6025 | 17 | ← no strategy |
+| D41 | 27 m/s | 0.5 | 0.016 | 69 | 0 | ← too hard |
+| D43 | 25 m/s | 0.5 | 0.022 | 275 | 0 | ← follow equilibrium |
+| D44 | 25 m/s | 2.0 | 0.055 | 1834 | 3 | ← equilibrium broken |
+| D45 | 25 m/s | 2.0 | 0.067 | 3727 | 8 | ← fine-tuning |
+| **D46** | **25 m/s** | **2.0** | **0.070** | **7943** | **17** | **← goal achieved ✓** |
+
+### Key Finding: Speed Improves Under Pressure
+
+Counter-intuitively, a harder opponent and stronger position reward produced a *faster*
+policy: D46 (27.28 m/s) beat D39 (26.91 m/s) despite more challenging conditions.
+The position bonus made "staying ahead" worth the risk of pushing speed limits.
+
+---
+
+## Real Track Geometry (D42 — Monaco)
+
+Replaced the synthetic oval (constant curvature) with real Monaco 2023 qualifying telemetry
+from FastF1. Primary hypothesis: the three curvature lookahead observations (dims 5/6/7) carry
+zero information on the oval (every corner is identical), but become genuinely useful on a
+real circuit with varying straights, hairpins, and chicanes.
+
+### Infrastructure
+
+- **FastF1 coordinate system**: position data is in **decimeters** — must divide by 10 for meters.
+  This was not documented and required debugging from crash patterns.
+- **Two-pass deduplication**: FastF1 telemetry has near-duplicate points (stationary frames).
+  Required removing points within 0.5m before resampling, then removing post-resample duplicates.
+- **Track-relative lookahead**: hardcoded waypoint offsets (5/15/30) replaced with
+  `N//40 / N//13 / N//7` to preserve the same time horizons across track densities.
+
+### Result
+
+**Primary hypothesis confirmed**: curvature weights on Monaco — col[5]=0.222, col[6]=0.179,
+col[7]=0.180 — all non-zero. On the oval, these columns converge to ~0. The Week 3 obs design
+was validated on a real circuit.
+
+**Expert driver failure**: the rule-based ExpertDriver (max_speed=17 m/s, corner_factor=12)
+crashed within 17 steps on average at Monaco. Root cause: large initial heading errors →
+`target_speed = 17 − 12×|err| < 0` → full brake → stall. All 50 collection episodes:
+0 laps, 884 total samples (need ~30k for usable BC). Training curriculum stuck in Stage 0.
+
+**Fix (D47)**: reduce max_speed=8.0, corner_factor=4.0, lookahead=5 so that even a 2.0 rad
+heading error still yields `target_speed = 8 − 4×2 = 0` (never negative).
+
+---
+
 ## Final Results Summary
 
 ### Fixed-Start Evaluation (N=10, deterministic policy)
 
 | Policy | Reward | Laps | Speed | Pits | Notes |
 |--------|--------|------|-------|------|-------|
-| **cv2 — Speed Champion** | **4531** | **17** | **26.9 m/s** | 0 | Best overall |
-| D39 — Multi-Agent | 6025* | 17 | 26.9 m/s | 0 | *different env |
-| D40 — Safety Car | 3820 | 13 | 21.7 m/s | 2 | *different env |
-| **D37 — Best Pit Policy** | **3477** | **15** | **23.7 m/s** | **3** | Best pit strategy |
-| D36 | 3427 | 15 | 23.6 m/s | 3 | |
+| **D46 — Multi-Agent Champion** | **7943** | **17** | **27.28 m/s** | 0 | **New project best** |
+| D39 — Multi-Agent Baseline | 6025 | 17 | 26.91 m/s | 0 | No positional strategy |
+| cv2 — Speed Champion | 4531 | 17 | 26.92 m/s | 0 | Single-agent best |
+| D40 — Safety Car | 3820 | 13 | 21.68 m/s | 2 | SC compliance |
+| **D37 — Best Pit Policy** | **3477** | **15** | **23.67 m/s** | **3** | Best pit strategy |
+| D36 | 3427 | 15 | 23.60 m/s | 3 | |
 | Expert (rule-based) | 2909 | 11 | 17.1 m/s | — | Baseline |
 | D32 — PitAwarePolicy | 2683 | 11 | 17.7 m/s | 1 | |
 | PPO from scratch | −83 | 0.05 | 2.9 m/s | — | Cold start failure |
 
+Note: D39, D40, D46 use different environments (multi-agent / safety car) with different reward
+scales. Within each environment, reward comparisons are valid.
+
 ### Progress Across the Project
 
 ```
-Expert (hand-coded)    →  2909 reward  (baseline)
-PPO speed champion     →  4531 reward  (+55.7% vs Expert)
-D37 pit strategy       →  3477 reward  (+19.5% vs Expert, +3 pit stops)
+Expert (hand-coded)        →  2909 reward  (baseline)
+PPO speed champion (cv2)   →  4531 reward  (+55.7% vs Expert)
+D37 pit strategy           →  3477 reward  (+19.5% vs Expert, +3 pit stops)
+D46 positional champion    →  7943 reward  (+173% vs Expert, col[11]=0.070)
 ```
 
 ---
@@ -328,6 +406,20 @@ its local optimum, falling from 3477 → 1730.
 SB3 bug (fixed in D28): `reset_num_timesteps=False` restores stored LR, ignoring
 the new schedule. Fix: always set both `model.learning_rate` AND `model.lr_schedule`.
 
+### 9. Closing the Shortcut Forces Conditional Behavior
+
+D39/D40 showed that PPO ignores new observation signals when a simpler strategy works.
+The fix in D41–D46: raise opponent speed so raw speed advantage is no longer sufficient,
+then raise the position_bonus so being ahead is worth fighting for. Both interventions
+were needed: speed pressure made track_gap *useful*, reward magnitude made it *worth using*.
+
+### 10. Curvature Observations Need Real Track Geometry
+
+On the oval (constant curvature), dims 5/6/7 carry no useful information and converge to
+~0 weight. On Monaco (varying curvature), they reached weights of 0.18–0.22 — among the
+strongest signals in the first layer. Observation design should be validated on the track
+type the agent will actually encounter.
+
 ### 8. RolloutBuffer Must Be Recreated After Obs Dim Extension
 `PPO.load()` pre-allocates a RolloutBuffer with the saved obs shape. After
 `extend_obs_dim()`, the buffer is still the old size. Explicit recreation required:
@@ -344,39 +436,44 @@ model.rollout_buffer = RolloutBuffer(
 
 ```
 env/
-  f1_env.py           F1Env — Gymnasium wrapper with all physics, reward, SC
-  car_model.py        KinematicCar + DynamicCar (Pacejka tyre model)
-  track.py            Oval track generator + geometry utilities
-  f1_multi_env.py     F1MultiAgentEnv — ego + ExpertDriver opponent
+  f1_env.py              F1Env — Gymnasium wrapper with all physics, reward, SC
+  car_model.py           KinematicCar + DynamicCar (Pacejka tyre model)
+  track.py               Oval track + FastF1 real track loader
+  f1_multi_env.py        F1MultiAgentEnv — ego + ExpertDriver opponent
+  f1_multi_pit_env.py    F1MultiAgentPitEnv — combined pit+multi-agent (14D, 3D)
 
 expert/
   expert_driver.py    Rule-based driver (lookahead + corner braking)
-  collect_data.py     Dataset generation
+  collect_data.py     Dataset generation (oval + Monaco variants)
 
 bc/
-  train_bc.py         Behavioral Cloning (MSE, Adam)
-  bc_policy_final.pt  Trained BC weights
+  train_bc.py           Behavioral Cloning (MSE, Adam)
+  train_bc_monaco.py    BC on Monaco expert data
+  bc_policy_final.pt    Trained BC weights (oval)
+  bc_policy_monaco.pt   Trained BC weights (Monaco)
 
 rl/
-  rewards.py          RacingReward — 5-component shaped reward
-  schedules.py        cosine_schedule, linear_schedule, warmup_cosine_schedule
-  bc_init_policy.py   load_bc_weights_into_ppo(), extend_obs_dim()
-  pit_aware_policy.py TyrLifeAugmentedExtractor + PitAwarePolicy (D32+)
-  curriculum.py       CurriculumStage, STAGES_*, CurriculumCallback
-  make_env.py         Environment factory functions
-  evaluate.py         Full evaluation pipeline + comparison plots
-  ppo_curriculum_v2.zip   Speed champion (4531, 26.9 m/s)
-  ppo_pit_v4_d37.zip      Best pit policy (3477, 3 pits, 23.7 m/s)
-  ppo_multi_agent_d39.zip Multi-agent (6025, 17 laps)
-  ppo_sc_d40.zip          Safety car (3820, 13 laps)
+  rewards.py              RacingReward — 5-component shaped reward
+  schedules.py            cosine_schedule, linear_schedule, warmup_cosine_schedule
+  bc_init_policy.py       load_bc_weights_into_ppo(), extend_obs_dim()
+  pit_aware_policy.py     TyrLifeAugmentedExtractor + PitAwarePolicy (D32+)
+  curriculum.py           CurriculumStage, STAGES_*, CurriculumCallback
+  make_env.py             Environment factory functions
+  evaluate.py             Full evaluation pipeline + comparison plots
+  ppo_curriculum_v2.zip       Speed champion (4531, 26.9 m/s)
+  ppo_pit_v4_d37.zip          Best pit policy (3477, 3 pits, 23.7 m/s)
+  ppo_multi_agent_d46.zip     Multi-agent champion (7943, 17 laps, 27.28 m/s) ← project best
+  ppo_sc_d40.zip              Safety car (3820, 13 laps)
+  ppo_monaco.zip              Monaco circuit (Stage 0 only, curvature validated)
 
 plots/
-  progress_dashboard.png    All 40 experiments, bar chart by phase
+  progress_dashboard.png    All 46 experiments, bar chart by phase
   tyre_trace_d37.png        D37 speed/tyre/reward trace with pit markers
-  trajectory_comparison.gif 2×2 animated GIF: 4 policies side by side
+  trajectory_comparison.gif 2×2 animated GIF: Expert / cv2 / D37 / D46
+  d46_analysis.png          D46 policy analysis: heatmap, column importance, evolution
 
 Notes/
-  d10.txt – d40.txt   Per-experiment documentation
+  d10.txt – d46.txt   Per-experiment documentation
   PROGRESS.txt        Full project history
 ```
 
@@ -384,23 +481,18 @@ Notes/
 
 ## What's Next
 
-Three natural extensions remain, in increasing order of difficulty:
+Two experiments in progress:
 
-**1. Force conditional SC behavior** (D40 follow-up)
-Add a green-flag speed bonus (`+1.0/step when v > 25 m/s AND sc_active=False`).
-This makes static slow driving suboptimal, forcing the agent to learn fast green /
-slow SC switching. Expected: col[12] weight becomes non-zero.
+**D47 — Fix Monaco** (in progress)
+Reduce ExpertDriver params (max_speed=8.0, corner_factor=4.0) so it survives Monaco's
+initial heading errors. Goal: ≥10k BC samples, curriculum advances past Stage 0.
 
-**2. Conditional multi-agent strategy** (D39 follow-up)
-Raise the opponent speed to 27 m/s (above ego capability). Agent can no longer
-win on raw speed — must learn drafting, blocking, or pit-timing against opponent.
-
-**3. Real track geometry**
-Replace the oval with an actual F1 circuit (Silverstone, Monaco). Requires variable
-curvature, track limits, DRS zones. The observation space and reward function are
-already general enough to handle non-oval tracks with minor modifications.
+**D48 — Combined Pit + Multi-Agent** (in progress)
+New `F1MultiAgentPitEnv`: 14D obs, 3D action, opponent at 25 m/s. Warm-start from D37
+(pit expert). Goal: agent pits at least once while also using track_gap for positioning.
+This would be the first policy to combine both forms of strategy.
 
 ---
 
-*Built over 6 weeks, 40 experiments, ~30M PPO training steps.*
-*Core stack: Python 3.14, PyTorch, Stable-Baselines3, Gymnasium, Matplotlib.*
+*Built over 7 weeks, 46 experiments, ~50M PPO training steps.*
+*Core stack: Python 3.14, PyTorch, Stable-Baselines3, Gymnasium, FastF1, Matplotlib.*
