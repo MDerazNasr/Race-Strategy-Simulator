@@ -1,9 +1,10 @@
 """
 Progress Dashboard — full project arc in one figure.
 
-Shows fixed-start reward for every experiment (d10–d40), annotated with
-key breakthroughs. Horizontal reference lines for Expert and cv2 baselines.
-Color-coded by phase: single-agent driving, pit strategy experiments, advanced.
+Shows fixed-start reward for every experiment (d10–d46), annotated with
+key breakthroughs. Horizontal reference lines for Expert, cv2, and D46 baselines.
+Color-coded by phase: single-agent driving, pit strategy experiments, advanced,
+positional strategy.
 
 Saves to: plots/progress_dashboard.png
 """
@@ -54,21 +55,32 @@ EXPERIMENTS = [
     # --- Advanced (d39–d40) ---
     ("d39\nmulti-agent *",   39,  6025, 2),
     ("d40\nsafety car *",    40,  3820, 2),
+
+    # --- Positional strategy (d41–d46) ---
+    ("d41\n(opp=27 *)",      41,    69, 3),
+    ("d42\nMonaco ‡",        42,   160, 3),   # Monaco training ep_rew (0 laps)
+    ("d43\n(follow eq *)",   43,   275, 3),
+    ("d44\n(pos×4 *)",       44,  1834, 3),
+    ("d45\n(8 laps *)",      45,  3727, 3),
+    ("d46\n★ BEST *",        46,  7943, 3),
 ]
 
 PHASE_COLORS = {
     0: "#4FC3F7",   # light blue — driving foundation
     1: "#FFB74D",   # orange — pit strategy
-    2: "#81C784",   # green — advanced
+    2: "#81C784",   # green — advanced (multi-agent / safety car)
+    3: "#CE93D8",   # purple — positional strategy (d41–d46)
 }
 PHASE_LABELS = {
     0: "Driving foundation",
     1: "Pit stop experiments (20 runs)",
     2: "Advanced: multi-agent / safety car\n(* different env, reward not directly comparable)",
+    3: "Positional strategy (D41–D46)\n(* multi-agent env  ‡ Monaco track, training ep_rew)",
 }
 
 EXPERT_REWARD = 2909
 CV2_REWARD    = 4531
+D46_REWARD    = 7943
 
 # ── Build figure ──────────────────────────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(18, 7), facecolor="#0D1117")
@@ -94,6 +106,8 @@ ax.axhline(EXPERT_REWARD, color="#AAAAAA", linestyle="--", linewidth=1.2, zorder
            label=f"Expert baseline ({EXPERT_REWARD})")
 ax.axhline(CV2_REWARD, color="#FF8C00", linestyle="--", linewidth=1.5, zorder=2,
            label=f"cv2 speed champion ({CV2_REWARD})")
+ax.axhline(D46_REWARD, color="#CE93D8", linestyle="--", linewidth=1.5, zorder=2,
+           label=f"D46 champion ({D46_REWARD})")
 ax.axhline(0, color="#555555", linestyle=":", linewidth=0.8, zorder=2)
 
 # Annotations for key breakthroughs
@@ -103,6 +117,7 @@ ANNOTATIONS = {
     "d36\n★ 3 pits!":      ("Full unfreeze:\n3 pits, 15 laps", +150),
     "cv2\n(3M steps)":     ("Speed champion:\n26.92 m/s", +150),
     "d39\nmulti-agent *":  ("Multi-agent:\n5 overtakes", +150),
+    "d46\n★ BEST *":       ("NEW BEST:\n7943 reward\n27.28 m/s", +150),
 }
 for i, label in enumerate(labels):
     if label in ANNOTATIONS:
@@ -124,7 +139,7 @@ ax.tick_params(axis="y", colors="#AAAAAA")
 ax.spines[:].set_color("#30363D")
 
 ax.set_title(
-    "F1 Racing Agent — Full Project Arc (40 Experiments)\n"
+    "F1 Racing Agent — Full Project Arc (46 Experiments)\n"
     "Fixed-start evaluation reward across all training runs",
     color="white", fontsize=13, fontweight="bold", pad=14,
 )
@@ -154,6 +169,7 @@ legend_patches = [
 legend_patches += [
     plt.Line2D([0], [0], color="#AAAAAA", linestyle="--", label=f"Expert ({EXPERT_REWARD})"),
     plt.Line2D([0], [0], color="#FF8C00", linestyle="--", label=f"cv2 ({CV2_REWARD})"),
+    plt.Line2D([0], [0], color="#CE93D8", linestyle="--", label=f"D46 champion ({D46_REWARD})"),
 ]
 ax.legend(handles=legend_patches, loc="upper left", fontsize=8,
           facecolor="#161B22", edgecolor="#30363D", labelcolor="white")

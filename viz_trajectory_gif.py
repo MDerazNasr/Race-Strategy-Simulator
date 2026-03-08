@@ -5,7 +5,7 @@ Side-by-side Trajectory GIF — 4 policies racing on the same oval.
   Top-left:     Expert (rule-based, 17 m/s)
   Top-right:    cv2 — PPO speed champion (26.9 m/s)
   Bottom-left:  D37 — best pit policy (23.7 m/s, 3 pits shown as flash)
-  Bottom-right: D39 — multi-agent (ego + ExpertDriver opponent)
+  Bottom-right: D46 — multi-agent champion (ego + opponent, 27.28 m/s)
 
 Each panel shows:
   - Dashed oval track
@@ -14,7 +14,7 @@ Each panel shows:
   - Live speed readout
 
 D37: pit events flash the panel background red momentarily.
-D39: two cars — ego (blue) and opponent (orange).
+D46: two cars — ego (purple) and opponent (orange).
 
 Saves to: plots/trajectory_comparison.gif
 """
@@ -110,36 +110,36 @@ for i, f in enumerate(traj_d37):
             pit_frames_d37.add(j)
         prev_pit = f["pit_count"]
 
-# 4. D39 — multi-agent (ego + opponent)
-print("[Viz] D39...")
-model_d39 = PPO.load(str(project_root / "rl" / "ppo_multi_agent_d39.zip"), device=device)
+# 4. D46 — multi-agent champion (ego + opponent, opp=25 m/s, pos_bonus=2.0)
+print("[Viz] D46...")
+model_d46 = PPO.load(str(project_root / "rl" / "ppo_multi_agent_d46.zip"), device=device)
 from env.f1_multi_env import F1MultiAgentEnv
-env_d39 = F1MultiAgentEnv()
+env_d46 = F1MultiAgentEnv(opp_max_speed=25.0, position_bonus=2.0)
 
-obs_d39, _ = env_d39.reset(options={"fixed_start": True})
-traj_d39 = []
-laps_d39 = 0
+obs_d46, _ = env_d46.reset(options={"fixed_start": True})
+traj_d46 = []
+laps_d46 = 0
 for _ in range(30_000):
-    action, _ = model_d39.predict(obs_d39, deterministic=True)
-    obs_d39, _, terminated, truncated, info_d39 = env_d39.step(action)
-    traj_d39.append({
-        "x": env_d39.car.x, "y": env_d39.car.y,
-        "speed": info_d39["speed"],
-        "opp_x": env_d39.opp_car.x, "opp_y": env_d39.opp_car.y,
-        "opp_speed": info_d39.get("opp_speed", 22.0),
+    action, _ = model_d46.predict(obs_d46, deterministic=True)
+    obs_d46, _, terminated, truncated, info_d46 = env_d46.step(action)
+    traj_d46.append({
+        "x": env_d46.car.x, "y": env_d46.car.y,
+        "speed": info_d46["speed"],
+        "opp_x": env_d46.opp_car.x, "opp_y": env_d46.opp_car.y,
+        "opp_speed": info_d46.get("opp_speed", 25.0),
     })
-    if info_d39["laps_completed"] > laps_d39:
-        laps_d39 = info_d39["laps_completed"]
-    if laps_d39 >= N_LAPS or terminated:
+    if info_d46["laps_completed"] > laps_d46:
+        laps_d46 = info_d46["laps_completed"]
+    if laps_d46 >= N_LAPS or terminated:
         break
-print(f"  → {len(traj_d39)} steps, {laps_d39} laps")
+print(f"  → {len(traj_d46)} steps, {laps_d46} laps")
 
 # ── Cap all trajectories to the same length ───────────────────────────────────
-max_len = min(len(traj_expert), len(traj_cv2), len(traj_d37), len(traj_d39))
+max_len = min(len(traj_expert), len(traj_cv2), len(traj_d37), len(traj_d46))
 traj_expert = traj_expert[:max_len]
 traj_cv2    = traj_cv2[:max_len]
 traj_d37    = traj_d37[:max_len]
-traj_d39    = traj_d39[:max_len]
+traj_d46    = traj_d46[:max_len]
 
 frame_indices = list(range(0, max_len, FRAME_SKIP))
 print(f"[Viz] Animating {len(frame_indices)} frames ({max_len} steps at 1:{FRAME_SKIP})...")
@@ -153,7 +153,7 @@ PANEL_CONFIGS = [
     {"title": "Expert (rule-based)",      "color": "#66BB6A", "traj": traj_expert},
     {"title": "cv2 — Speed Champion",     "color": "#42A5F5", "traj": traj_cv2},
     {"title": "D37 — Pit Strategy",       "color": "#FF7043", "traj": traj_d37},
-    {"title": "D39 — Multi-Agent",        "color": "#AB47BC", "traj": traj_d39},
+    {"title": "D46 — Multi-Agent Champion", "color": "#AB47BC", "traj": traj_d46},
 ]
 
 axs = [axes[0][0], axes[0][1], axes[1][0], axes[1][1]]
@@ -198,14 +198,14 @@ for i, (ax, cfg) in enumerate(zip(axs, PANEL_CONFIGS)):
     opp_dots.append(None)
     tyre_texts.append(None)
 
-# D39: add opponent elements
-opp_trail_d39, = axs[3].plot([], [], "-", color="#FF8F00", linewidth=0.8, alpha=0.4)
-opp_dot_d39,   = axs[3].plot([], [], "o", color="#FF8F00", markersize=5, zorder=4)
-opp_trails[3]  = opp_trail_d39
-opp_dots[3]    = opp_dot_d39
+# D46: add opponent elements
+opp_trail_d46, = axs[3].plot([], [], "-", color="#FF8F00", linewidth=0.8, alpha=0.4)
+opp_dot_d46,   = axs[3].plot([], [], "o", color="#FF8F00", markersize=5, zorder=4)
+opp_trails[3]  = opp_trail_d46
+opp_dots[3]    = opp_dot_d46
 axs[3].plot([], [], "-o", color=PANEL_CONFIGS[3]["color"], markersize=4,
             label="Ego (PPO)")
-axs[3].plot([], [], "-o", color="#FF8F00", markersize=4, label="Opponent")
+axs[3].plot([], [], "-o", color="#FF8F00", markersize=4, label="Opponent (25 m/s)")
 axs[3].legend(loc="lower right", fontsize=7, facecolor="#161B22",
               edgecolor="#30363D", labelcolor="white")
 
@@ -217,7 +217,7 @@ tyre_texts[2] = axs[2].text(
 
 def update(frame_idx):
     artists = []
-    trajs = [traj_expert, traj_cv2, traj_d37, traj_d39]
+    trajs = [traj_expert, traj_cv2, traj_d37, traj_d46]
 
     for i, (trail, dot, stext, cfg, traj) in enumerate(
             zip(trails, dots, speed_texts, PANEL_CONFIGS, trajs)):
