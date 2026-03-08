@@ -1530,3 +1530,28 @@ Key findings:
   5. Combined reward: 3524 > D37's 3477 despite only 6 laps (position bonus compensates).
 
 D48 proves pit knowledge and positional awareness CAN coexist. Stability needs tuning.
+
+==============================================================================
+D48b: Pit+Multi-Agent Stability Fix (position_bonus 2.0 → 1.0) (2026-03-08)
+==============================================================================
+
+Fix: halve position_bonus (2.0→1.0). Warm-start from D48 (14D, 3D, PitAwarePolicy).
+3M steps, 1668 seconds.
+
+Results fixed start (N=10, deterministic):
+  reward=6122, laps=14, speed=23.53 m/s, pits=4, completion=100%, ego ahead=64.2%
+  Pit timing: steps 476/940/1390/1835, tyre_life≈0.49 each — consistent periodic strategy!
+
+Post-training:
+  col[11] (tyre_life) = 0.125 (+22.7%), col[12] (track_gap) = 0.012 (preserved ✓)
+  Pit threshold: tl=0.591 (rock-stable from D37). Pit std=2.011 (high in stochastic).
+
+Key findings:
+  1. Stability restored: 100% completion (was 0%), 14 laps (was 6).
+  2. 4 voluntary pits at tl≈0.49, intervals ~460 steps — most consistent pit strategy ever.
+  3. Ego ahead 64.2% — positional dominance preserved (col[12]=0.012 > 0 ✓).
+  4. Reward 6122 = +76% vs D37 (3477) — NEW PROJECT BEST for pit-circuit policies.
+     (D46 at 7943 is higher but has no pits; D48b = best combined pit+racing policy.)
+
+The periodic pit cadence acts as an implicit undercut: fresh tyres → faster →
+maintain/take position. Mean track_gap=-0.068 (ego consistently ahead on average).

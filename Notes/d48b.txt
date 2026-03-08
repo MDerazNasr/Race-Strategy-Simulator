@@ -1,0 +1,121 @@
+D48b — Pit+Multi-Agent Stability Fix (position_bonus 2.0 → 1.0)
+=================================================================
+Date: 2026-03-08
+
+OBJECTIVE
+---------
+D48 proved pit knowledge and positional awareness CAN coexist but crashed
+every episode (0% completion, 6 laps). Root cause: position_bonus=2.0 over-
+incentivized risk-taking. D48b halves it to 1.0 to restore driving stability
+while preserving the combined skills.
+
+CHANGE
+------
+Env: F1MultiAgentPitEnv(position_bonus=1.0)   [D48 used 2.0]
+Warm-start: ppo_multi_pit_d48.zip (14D, 3D, PitAwarePolicy)
+Steps: 3M (shorter — D48 already has combined features, just needs rebalancing)
+
+TRAINING
+--------
+Duration: 1668 seconds (~28 minutes)
+Final ep_rew_mean: 2910 (training env, random starts)
+Final ep_len_mean: 1080 steps
+Training converged: approx_kl=5e-5, clip_fraction=0 (fully converged)
+
+POST-TRAINING DIAGNOSTICS
+--------------------------
+  policy_net[0] abs_mean = 0.067844  [D48=0.065885]  +3.0%
+  col[11] (tyre_life)    = 0.125382  [D48=0.102227]  +22.7%  (pit timing more important!)
+  col[12] (track_gap)    = 0.012292  [D48=0.023279]  -47%    (still > 0 ✓)
+  col[13] (opp_speed)    = 0.007875
+  action_net[2, 128]     = -30.1849  [D48=-30.1297]  (<0.2% drift)
+  action_net.bias[2]     = +17.8259  [D48=+17.8866]
+  Pit threshold: tl ≈ 0.591  (target 0.60 ✓, stable from D37→D48→D48b)
+  log_std = [-0.396, -1.855, 0.699]
+  std     = [0.673, 0.157, 2.011]
+
+Note: pit std=2.011 is very high. In stochastic eval, pit timing will vary.
+In deterministic eval (deterministic=True), actions are the mean = very consistent.
+
+EVALUATION RESULTS (fixed start, N=10, deterministic)
+------------------------------------------------------
+  Reward:     6122 ± 0  (D37=3477, +76.1%; D48=3524; D46=7943)
+  Laps:       14  (D37=15, D46=17)
+  Speed:      23.53 m/s avg  (D37=23.67, D46=27.28)
+  Pits:       4  (D37=3, D48=1)
+  Completion: 100%  (D48=0%, D37=100%)
+  Ego ahead:  64.2% of steps  (D46=56%)
+
+PIT TIMING TRACE (from episode analysis)
+------------------------------------------
+  Pit 1: step=476,  tyre_life_before=0.486  ✓ (< 0.60 threshold)
+  Pit 2: step=940,  tyre_life_before=0.483  ✓
+  Pit 3: step=1390, tyre_life_before=0.486  ✓
+  Pit 4: step=1835, tyre_life_before=0.501  ✓
+
+Pit intervals: 476, 464, 450, 445 steps — highly consistent periodic strategy!
+All pits at tl ≈ 0.49 (well within voluntary_pit_bonus zone of 0.60) ✓
+Mean track_gap = -0.068 (ego slightly ahead on average), std=0.261
+
+KEY FINDINGS
+-----------
+
+1. STABILITY FULLY RESTORED ✓
+   - 100% completion (restored from D48's 0%)
+   - 14 laps vs D48's 6 (from crash recovery)
+   - position_bonus=1.0 provides meaningful incentive (+2000/ep if always ahead)
+     without the instability of 2.0
+
+2. PIT STRATEGY: 4 PITS, MOST CONSISTENT YET ✓
+   - 4 voluntary pits (more than D37's 3!)
+   - All at tl≈0.49, intervals ≈460 steps — near-perfect periodic strategy
+   - The PitAwarePolicy direct connection is rock-solid through 3 experiments
+
+3. POSITIONAL DOMINANCE PRESERVED ✓
+   - col[12]=0.012 (down from D48's 0.023, but still non-zero ✓)
+   - Ego ahead 64.2% of steps
+   - Mean track_gap=-0.068 (consistently slightly ahead)
+   - The lower col[12] weight with position_bonus=1.0 is expected: less incentive
+     → less aggressive position-seeking, but still using the signal
+
+4. REWARD: 6122 — PROJECT BEST FOR PIT CIRCUITS ✓
+   - 76% above D37 (3477) despite similar speed (23.53 vs 23.67 m/s)
+   - The 6122 reward decomposed:
+       Base racing reward (speed/heading/lateral): ~2400 (similar to D37)
+       4 pit cycles: 4 × (-200+300) = +400
+       14 lap bonuses: 14 × 100 = +1400
+       Position bonus: 1.0/step × 64.2% × 2000 = +1284
+       Total ≈ 5484... actual = 6122 (overtake bonuses add the rest)
+   - D46 has 7943 but no pits; D48b = 6122 with 4 pits
+
+5. TYRE LIFE WEIGHT INCREASED (+22.7%)
+   - col[11] (tyre_life) = 0.102 → 0.125
+   - With position_bonus halved, relative importance of pit timing increased
+   - The agent is using tyre_life information MORE after stability was restored
+
+THE UNDERCUT PATTERN
+---------------------
+The regular pit cadence (every ~460 steps at tl≈0.49) serves as an implicit
+undercut: after each pit, the ego has fresh tyres → faster than the unworn-
+tyre opponent → briefly gains ground on track. The 64.2% ahead figure confirms
+the agent maintains or improves position after each pit stop.
+
+COMPARISON TABLE
+----------------
+| Policy | Reward | Laps | Speed | Pits | Compl | Ahead | col[12] |
+|--------|--------|------|-------|------|-------|-------|---------|
+| D48b   | 6122   | 14   | 23.53 | 4    | 100%  | 64.2% | 0.012   |
+| D48    | 3524   | 6    | 23.63 | 1    | 0%    | 76.9% | 0.023   |
+| D37    | 3477   | 15   | 23.67 | 3    | 100%  | —     | 0.000   |
+| D46    | 7943   | 17   | 27.28 | 0    | 100%  | 56%   | 0.070   |
+| D39    | 6025   | 17   | 26.91 | 0    | 100%  | —     | 0.000   |
+
+D48b is the strongest pit-circuit policy, combining pit strategy with positional
+awareness for the first time at full completion.
+
+WHAT'S NEXT
+-----------
+Possible D49+:
+  A) Raise training steps (3M→5M) to see if laps improve to 15+ (gap to D37)
+  B) Add pit_count to evaluation to compare deterministic vs stochastic
+  C) Monaco D49 (no curriculum, in progress) — see if real-track training works

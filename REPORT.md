@@ -492,23 +492,36 @@ Curriculum PPO still stuck in Stage 0 — oval curriculum `grad_lap_rate=0.5` re
 Curvature weights non-zero (col[5/6/7]=0.17/0.16/0.14).
 **Next**: D49 — skip curriculum, straight PPO from BC at `max_accel=8 m/s²`.
 
-**D48 — Combined Pit + Multi-Agent** (complete)
+**D48 — Combined Pit + Multi-Agent** (complete, stepping stone to D48b)
 `F1MultiAgentPitEnv`: 14D obs (`obs[11]=tyre_life, obs[12]=track_gap`), 3D action.
-Warm-start from D37 (12D→14D), 5M steps, opponent at 25 m/s.
+Warm-start from D37 (12D→14D), 5M steps. Proved the two skills are compatible but
+crashed every episode (`position_bonus=2.0` too aggressive). Directed fix to D48b.
 
-Results (fixed start, N=10, deterministic):
-- Reward: **3524** (D37=3477, +1.4%)
-- Speed: 23.63 m/s avg, **27.27 m/s** peak (matches D46's top speed)
-- Pits: 1 at step 455, tyre_life=0.512 ✓ (correctly below 0.60 threshold)
-- Ego ahead: **76.9% of steps** (D46=56% — more dominant)
-- Completion: 0% — crashes at step 883 (stability regression)
+**D48b — Stability Fix: position_bonus 2.0 → 1.0** (complete)
+Warm-start from D48, 3M steps. Results (fixed start, N=10, deterministic):
 
-Key findings: pit knowledge transferred intact (`action_net[2,128]` unchanged, <0.2% drift),
-positional awareness emerged (`col[12]=0.023`), combined skills ARE compatible.
-Stability regression from `position_bonus=2.0` driving too aggressively.
-**Next**: D48b — reduce position_bonus (2.0→1.0) to restore completion rate.
+| Metric | D48b | D37 (pit) | D46 (pos) |
+|--------|------|-----------|-----------|
+| Reward | **6122** | 3477 | 7943 |
+| Laps | 14 | 15 | 17 |
+| Speed | 23.53 m/s | 23.67 | 27.28 |
+| Pits | **4** | 3 | 0 |
+| Pit timing | tl≈0.49 | — | — |
+| Completion | **100%** | 100% | 100% |
+| Ego ahead | **64.2%** | — | 56% |
+
+**Key findings**:
+- Pit timing: 4 voluntary pits at steps 476/940/1390/1835, all at `tl≈0.49` — periodic strategy
+- `col[12]` (track_gap) weight = 0.012 (preserved, positional awareness maintained)
+- Reward 6122 = **+76% above D37** despite similar speed — position bonus adds ~1280/ep
+- The periodic pits act as an implicit undercut: fresh tyres → maintain speed → stay ahead
+- D48b = **best pit-circuit policy in the project** (combined pit + racing)
+
+**D49 — Monaco No-Curriculum** (in progress)
+Skip STAGES curriculum (which gets stuck at Stage 0 on Monaco's 12× longer lap).
+Plain PPO from BC init, `max_accel=8` fixed, `max_steps=8000`.
 
 ---
 
-*Built over 7 weeks, 48 experiments, ~60M PPO training steps.*
+*Built over 7 weeks, 49+ experiments, ~65M PPO training steps.*
 *Core stack: Python 3.14, PyTorch, Stable-Baselines3, Gymnasium, FastF1, Matplotlib.*
