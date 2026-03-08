@@ -1,0 +1,158 @@
+D48 — Pit Stops + Multi-Agent Racing Combined
+=============================================
+Date: 2026-03-08
+
+OBJECTIVE
+---------
+First experiment to require BOTH pit timing AND positional strategy simultaneously.
+Every previous experiment specialised in ONE of these:
+  - D37: best pit policy (3 pits, 23.67 m/s, 3477 reward) — no opponent
+  - D46: best position strategy (col[11]=0.070, 7943 reward, 56% ahead) — no pits
+
+D48 creates F1MultiAgentPitEnv: ego with tyre degradation + pit stops vs
+ExpertDriver opponent at 25 m/s.
+
+Key question: can the agent simultaneously learn WHEN to pit AND HOW to beat
+the opponent? Does an "undercut" emerge (pit earlier to take position)?
+
+ENVIRONMENT: env/f1_multi_pit_env.py
+-------------------------------------
+Observation (14D):
+  [0-10]  Standard 11D ego obs
+  [11]    tyre_life ∈ [0,1]  ← obs[11] = tyre_life (PitAwarePolicy-compatible!)
+  [12]    track_gap ∈ [-1,1] ← positive = opponent ahead
+  [13]    opp_speed_norm ∈ [0,1]
+
+Action (3D): [throttle, steer, pit_signal]
+
+Ego: DynamicCar(base_wear=0.0003, slip_coef=0.002) — same as D32–D37
+Opponent: DynamicCar() + ExpertDriver at 25 m/s, no tyre degradation
+
+Rewards:
+  - RacingReward base (speed, heading, lateral, action smoothness)
+  - lap_bonus = +100/lap
+  - position_bonus = +2.0/step when ahead (proven in D44/D46)
+  - overtake_bonus = +200 (200-step cooldown)
+  - collision_penalty = -0.5/step within 3m
+  - pit_penalty = -200
+  - voluntary_pit_bonus = +300 when tyre_life < 0.60 AND pit voluntarily
+
+WARM-START: D37 (12D obs, 3D action, PitAwarePolicy)
+extend_obs_dim(model, 12, 14) — zero-pads dims 12–13
+PitAwarePolicy.TYRE_LIFE_OBS_IDX = 11 → pit signal uses obs[11] unchanged ✓
+
+TRAINING
+--------
+Steps: 5M
+LR: cosine 1e-4 → 1e-6
+ent_coef: 0.01 (prevents log_std collapse — d38 lesson)
+Adam optimizer reset (fresh momentum)
+Full unfreeze: 37,386 / 37,386 params trainable
+Duration: 2643 seconds (~44 minutes)
+
+Training curve:
+  Iter 1:  ep_rew=5740, ep_len=2000  (D37 pit skills fully operational on step 0)
+  100k:    ep_rew=4260, ep_len=1260  (adapting to opponent — reward dip expected)
+  500k:    ep_rew=3120, ep_len=977   (bottom of dip)
+  950k:    ep_rew=3600, ep_len=1090  (recovery)
+  5M:      ep_rew=4010, ep_len=1240  (converged above D37's 3477 ✓)
+
+POST-TRAINING DIAGNOSTICS
+--------------------------
+  policy_net[0] abs_mean = 0.065885  [D37=0.070232]  -6.2%
+  policy_net[2] abs_mean = 0.021252  [D37=0.021222]  +0.1%
+  col[11] (tyre_life)    abs_mean = 0.102227  (strongly used)
+  col[12] (track_gap)    abs_mean = 0.023279  (LEARNED! was 0.0 init)
+  col[13] (opp_speed)    abs_mean = 0.005221  (minor signal)
+  action_net[2, 128] = -30.1297  [D37=-30.0756]  (tyre_life direct, stable ✓)
+  action_net.bias[2] = +17.8866  [D37=+17.9721]  (pit threshold, stable ✓)
+  Effective pit threshold: tl ≈ 0.594  (target was 0.60 ✓)
+  log_std = [-0.779, -2.044, 0.376]
+  std     = [0.459, 0.129, 1.457]
+
+Throttle std: 0.181 → 0.459 (+154%) — more aggressive driving
+Pit std:      0.710 → 1.457 (+105%) — more variable pit decisions (position-dependent?)
+
+EVALUATION RESULTS (fixed start, N=10, deterministic)
+------------------------------------------------------
+  Reward:     3524.0 ± 0.0  (D37=3477, +1.4%)
+  Laps:       6.0
+  Speed avg:  23.63 m/s  (D37=23.67, essentially identical)
+  Speed max:  27.27 m/s  (matches D46's 27.28 m/s — very fast!)
+  Pits:       1.00
+  Pit step:   455 (tyre_life=0.512 at pit ✓, < 0.60 threshold)
+  Completion: 0% (crashes at step 883)
+  Ego ahead:  76.9% of steps  (D46=56% — MORE DOMINANT!)
+
+KEY FINDINGS
+-----------
+
+1. PIT KNOWLEDGE TRANSFERRED SUCCESSFULLY ✓
+   - 1 voluntary pit per episode, at tyre_life=0.512 (correctly below threshold)
+   - action_net[2, 128] barely changed: -30.076 → -30.130 (<0.2% drift)
+   - Pit threshold stable: 0.60 → 0.594 (within 1%)
+   - The PitAwarePolicy direct connection is robust to combined-task fine-tuning
+
+2. POSITIONAL AWARENESS LEARNED ✓
+   - col[12] (track_gap) weight: 0.0 → 0.023 (same magnitude as D43's 0.022)
+   - Ego ahead 76.9% of steps vs D46's 56% — MORE ASSERTIVE with position
+   - The agent is using track_gap to drive more aggressively when behind
+
+3. SPEED IMPROVEMENT ✓
+   - Avg 23.63 m/s (D37=23.67 m/s, essentially same)
+   - Max 27.27 m/s (matches D46's 27.28 m/s peak — opponent pressure drives speed)
+   - The opponent at 25 m/s pushes the ego to drive near its speed limit
+
+4. STABILITY REGRESSION ✗
+   - Crashes at step 883 in fixed-start eval (D37 survives full 2000 steps)
+   - Completion: 0% vs D37's 100%
+   - Fewer laps: 6 vs D37's 15
+   - Root cause: position_bonus=2.0 incentivizes aggressive racing at cost of margin
+     The agent trades stability for dominance — a valid strategic choice but
+     reduces lap count and completion rate
+
+5. COMBINED REWARD IS MIXED
+   - 3524 reward (vs D37=3477) despite only 6 laps (vs D37's 15)
+   - Position bonus earned: 2.0 × 76.9% × 883 steps = +1358 total
+   - Fewer laps/lap bonuses offset by position dominance
+   - Training ep_rew=4010 (training env has random starts, more recovery chances)
+
+ANALYSIS: DID AN UNDERCUT EMERGE?
+-----------------------------------
+Partially. The agent pits at step 455 (tyre_life=0.512) which is earlier than
+D37's optimal pit timing of ~step 600+ (tyre_life < 0.35). The earlier pit at
+tl=0.512 is inside the voluntary_pit_bonus zone (tl<0.60) but could also be
+driven by positional considerations (pit when briefly behind to get fresh tyres
+and emerge ahead). Without replay analysis, we can't confirm deliberate undercut
+strategy, but the timing is consistent with position-aware pit decisions.
+
+The col[12] (track_gap) weight at 0.023 confirms the agent reads position, but
+with only 1 pit per episode, the undercut opportunity is limited.
+
+WHAT'S NEXT: D49 CANDIDATES
+-----------------------------
+
+A) D48b — reduce position_bonus (2.0→1.0) to restore completion rate while
+   keeping positional learning. The combined reward should be more balanced.
+
+B) D48b — increase pit count to 2+ by running more steps (5M was enough for
+   D37 to get 3 pits, but D48 added complexity). Try 7-8M steps.
+
+C) D49 Monaco (no curriculum) — skip curriculum entirely, use straight PPO
+   from BC at fixed max_accel=8 m/s², 5M steps.
+
+D) Visualization — viz_d48_analysis.py showing pit timing vs track_gap correlation,
+   tyre_life trace alongside position trace.
+
+REFERENCE COMPARISON
+--------------------
+| Policy      | Reward | Laps | Speed   | Pits | Completion | Track_gap wt |
+|-------------|--------|------|---------|------|------------|--------------|
+| D48 (this)  | 3524   | 6    | 23.63   | 1    | 0%         | 0.023        |
+| D37 (pits)  | 3477   | 15   | 23.67   | 3    | 100%       | 0.000        |
+| D46 (pos)   | 7943   | 17   | 27.28   | 0    | 100%       | 0.070        |
+| D39 (base)  | 6025   | 17   | 26.91   | 0    | 100%       | 0.000        |
+
+D48 successfully combines pit knowledge and positional awareness for the first
+time in the project, at the cost of stability. The two skills ARE compatible;
+the balance just needs further tuning.

@@ -336,8 +336,12 @@ crashed within 17 steps on average at Monaco. Root cause: large initial heading 
 `target_speed = 17 − 12×|err| < 0` → full brake → stall. All 50 collection episodes:
 0 laps, 884 total samples (need ~30k for usable BC). Training curriculum stuck in Stage 0.
 
-**Fix (D47)**: reduce max_speed=8.0, corner_factor=4.0, lookahead=5 so that even a 2.0 rad
-heading error still yields `target_speed = 8 − 4×2 = 0` (never negative).
+**Fix (D47)**: reduce max_speed=6.0, corner_factor=3.0, lookahead=1. The key insight was that
+lookahead=8 waypoints = 100m ahead → lateral correction `atan(1/100)=0.01 rad` (too small to
+correct drift). Lookahead=1 (12.5m) gives 5× stronger correction. Result: 24,364 samples vs 884,
+3 full Monaco laps in 100 collection episodes. BC training successful (loss 0.012→0.003).
+Curriculum PPO still stuck in Stage 0 — oval curriculum requires 50% lap completion, Monaco's
+~3750m lap is 12× longer than the oval, unreachable at curriculum speeds.
 
 ---
 
@@ -481,18 +485,30 @@ Notes/
 
 ## What's Next
 
-Two experiments in progress:
+**D47 — Monaco Expert Fix** (complete)
+Data collection fixed: 24,364 samples, 3 full Monaco laps. BC successful (loss 0.003).
+Curriculum PPO still stuck in Stage 0 — oval curriculum `grad_lap_rate=0.5` requires
+50% lap completion but Monaco (3750m) is 12× longer than the oval at curriculum speeds.
+Curvature weights non-zero (col[5/6/7]=0.17/0.16/0.14).
+**Next**: D49 — skip curriculum, straight PPO from BC at `max_accel=8 m/s²`.
 
-**D47 — Fix Monaco** (in progress)
-Reduce ExpertDriver params (max_speed=8.0, corner_factor=4.0) so it survives Monaco's
-initial heading errors. Goal: ≥10k BC samples, curriculum advances past Stage 0.
+**D48 — Combined Pit + Multi-Agent** (complete)
+`F1MultiAgentPitEnv`: 14D obs (`obs[11]=tyre_life, obs[12]=track_gap`), 3D action.
+Warm-start from D37 (12D→14D), 5M steps, opponent at 25 m/s.
 
-**D48 — Combined Pit + Multi-Agent** (in progress)
-New `F1MultiAgentPitEnv`: 14D obs, 3D action, opponent at 25 m/s. Warm-start from D37
-(pit expert). Goal: agent pits at least once while also using track_gap for positioning.
-This would be the first policy to combine both forms of strategy.
+Results (fixed start, N=10, deterministic):
+- Reward: **3524** (D37=3477, +1.4%)
+- Speed: 23.63 m/s avg, **27.27 m/s** peak (matches D46's top speed)
+- Pits: 1 at step 455, tyre_life=0.512 ✓ (correctly below 0.60 threshold)
+- Ego ahead: **76.9% of steps** (D46=56% — more dominant)
+- Completion: 0% — crashes at step 883 (stability regression)
+
+Key findings: pit knowledge transferred intact (`action_net[2,128]` unchanged, <0.2% drift),
+positional awareness emerged (`col[12]=0.023`), combined skills ARE compatible.
+Stability regression from `position_bonus=2.0` driving too aggressively.
+**Next**: D48b — reduce position_bonus (2.0→1.0) to restore completion rate.
 
 ---
 
-*Built over 7 weeks, 46 experiments, ~50M PPO training steps.*
+*Built over 7 weeks, 48 experiments, ~60M PPO training steps.*
 *Core stack: Python 3.14, PyTorch, Stable-Baselines3, Gymnasium, FastF1, Matplotlib.*

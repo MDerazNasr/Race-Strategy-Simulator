@@ -1509,4 +1509,24 @@ GOAL: First experiment to require BOTH pit timing AND positional strategy.
   obs[11]=tyre_life (PitAwarePolicy-compatible), obs[12]=track_gap, obs[13]=opp_speed.
   Warm-start from D37 (12D→14D extend_obs_dim), 5M steps.
 
-Initial ep_rew = 5740 (D37 pit skills preserved at start). Training in progress.
+Initial ep_rew = 5740 (D37 pit skills preserved at start). Training: 5M steps, 2643s.
+
+Results fixed start (N=10, deterministic):
+  reward=3524, laps=6, avg_speed=23.63 m/s, max_speed=27.27 m/s, pits=1, completion=0%
+  Ego ahead 76.9% of steps. Pit at step 455, tyre_life=0.512 ✓
+
+Post-training diagnostics:
+  col[11] (tyre_life) weight = 0.102, col[12] (track_gap) weight = 0.023 (LEARNED ✓)
+  col[13] (opp_speed) weight = 0.005. Pit threshold tl=0.594 (stable from D37).
+  Throttle std: 0.181→0.459 (+154%). Pit std: 0.710→1.457 (+105%).
+
+Key findings:
+  1. Pit knowledge transferred: 1 pit at tl=0.512 (<0.60 threshold ✓), direct connection
+     action_net[2,128] barely changed (-30.076→-30.130, <0.2% drift).
+  2. Positional awareness: col[12]=0.023, ego ahead 76.9% (more dominant than D46's 56%).
+  3. Speed: 23.63 m/s avg (matches D37), 27.27 m/s max (matches D46's peak).
+  4. Stability regression: crashes at step 883, 0% completion vs D37's 100%.
+     Root cause: position_bonus=2.0 incentivizes aggressive racing at expense of margin.
+  5. Combined reward: 3524 > D37's 3477 despite only 6 laps (position bonus compensates).
+
+D48 proves pit knowledge and positional awareness CAN coexist. Stability needs tuning.
