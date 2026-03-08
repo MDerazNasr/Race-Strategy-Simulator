@@ -1,0 +1,124 @@
+D47 — Monaco Expert Fix + Curriculum PPO (Attempt 2)
+======================================================
+Date: 2026-03-08
+
+OBJECTIVE
+---------
+D42 failed at the data collection stage: the expert driver averaged only 17 steps
+per episode (884 total samples) because `target_speed = max_speed - corner_factor × |err|`
+went negative at Monaco's large initial heading errors → stall → crash.
+
+D47 fixes the expert driver params so BC data collection succeeds, then re-runs
+the full Monaco pipeline (collect → BC → curriculum PPO).
+
+WHAT CHANGED VS D42
+-------------------
+expert/collect_data.py → generate_monaco_dataset():
+
+    OLD (D42): max_speed=17.0, corner_factor=12.0, lookahead=8
+    NEW (D47): max_speed=6.0,  corner_factor=3.0,  lookahead=1
+
+Root cause diagnosis:
+  - D42's lookahead=8 waypoints on Monaco = 8 × 12.5m/pt = 100m ahead.
+    The steering correction for a 1m lateral offset at 100m lookahead is
+    atan(1/100) ≈ 0.010 rad — far too small to correct drift on a straight.
+    The car drifted ~0.05m/step until it exceeded the 3m termination boundary.
+  - The key fix is lookahead=1 (12.5m ahead) — correction = atan(1/12.5) = 0.080 rad,
+    5× larger, sufficient for Monaco's tight track profile.
+  - max_speed and corner_factor reductions provide extra safety margin.
+
+DATA COLLECTION RESULTS
+-----------------------
+100 episodes, random starts:
+  Total samples: 24,364  (D42: 884)
+  Full Monaco laps: 3 episodes (episodes 72, 77, 85)
+  Average length: ~244 steps (bimodal: ~50% crash in <20 steps, ~50% survive 600+)
+
+The bimodal behavior is due to Monaco's tight hairpins: some random starting
+positions have large initial lateral errors that the low-speed expert still cannot
+recover from. The 100-episode run gives sufficient long-episode data for BC.
+
+BC TRAINING RESULTS
+-------------------
+Script: bc/train_bc_monaco.py
+Input: bc/expert_data_monaco.npz (24,364 samples, 11D obs, 2D action)
+Output: bc/bc_policy_monaco.pt
+
+  Initial loss: 0.012
+  Final loss:   0.003
+  Training: SUCCESS — BC loss converged normally.
+
+PPO CURRICULUM RESULTS (ppo_monaco.zip)
+----------------------------------------
+Script: rl/train_ppo_monaco.py
+3M steps, STAGES curriculum (same as oval experiments)
+max_steps=6000 per episode
+
+Final state:
+  Stage: 0  (curriculum NEVER advanced beyond Stage 0)
+  ep_len_mean: 514 steps
+  ep_rew_mean: 261
+  lap_rate: 0  (zero laps completed)
+  col[5] curv_near: 0.1692
+  col[6] curv_mid:  0.1571
+  col[7] curv_far:  0.1357
+  std: [0.292, 0.138]
+
+SAME QUALITATIVE RESULT AS D42 — curriculum stuck in Stage 0, 0 laps.
+
+ROOT CAUSE ANALYSIS
+-------------------
+The STAGES curriculum was designed for the oval track. Stage 0 requires
+grad_lap_rate=0.5 (50% of episodes must complete ≥1 lap) before advancing.
+
+Monaco geometry makes this impossible:
+  - Monaco circumference: ~3750m (300 wpts × 12.5m/pt)
+  - At Stage 0 max_accel=6 m/s² with BC init at ~6 m/s, the agent drives
+    at moderate speed but still crashes at tight hairpins
+  - ep_len_mean = 514 steps → distance covered ≈ 514 × 0.1s × ~6 m/s ≈ 308m
+  - 308m / 3750m = 8.2% of one lap — far from the 50% lap completion needed
+  - After 3M steps the agent converged to a fixed crashing pattern at ~500 steps
+
+Why the BC init doesn't help enough:
+  - BC was trained on max_speed=6 m/s data (lookahead=1, reactive steering)
+  - Stage 0 curriculum allows max_accel=6 m/s² → car can go faster than 6 m/s
+  - At higher speeds, lookahead=1 steering behavior (trained at 6 m/s) overshoots
+    corners → instability → crash
+
+WHAT SUCCEEDED IN D47
+----------------------
+1. Data collection fixed: 24,364 samples (27× improvement), 3 full laps
+2. BC training works: loss converges, policy saved
+3. Curvature weights confirmed non-zero (col[5/6/7] = 0.17/0.16/0.14):
+   The curvature observations ARE being used, even in the crashed-stuck policy.
+   This confirms D42's finding: curvature signal is useful on real track geometry.
+
+WHAT'S NEEDED FOR D49 (MONACO V3)
+------------------------------------
+The fundamental issue is that STAGES curriculum is too aggressive for Monaco.
+Options:
+
+Option A — Monaco-specific curriculum with lower speed limits:
+  Stage 0: max_accel=2, max_speed_soft=8, grad_lap_rate=0.2 (20% completion OK)
+  Stage 1: max_accel=4, grad_lap_rate=0.1
+  Stage 2: max_accel=8, grad_lap_rate=0 (never graduates, train to budget)
+
+Option B — Skip curriculum entirely, PPO fine-tune from BC at fixed max_accel:
+  - No CurriculumCallback
+  - Set car.max_accel=8 (moderate, not too fast for Monaco)
+  - Run 5M steps directly
+  - The BC policy already drives at ~6 m/s — PPO just needs to optimize
+
+Option C — Reduce max_steps from 6000 to 3000 so the graduation criterion is
+  for partial laps (easier to satisfy), then increase later.
+
+Recommended: Option B (simplest, avoids curriculum hyperparameter tuning).
+Expected outcome: policy learns to navigate Monaco hairpins at ~8 m/s,
+completing full laps. Curvature weights should remain non-zero or increase.
+
+REFERENCE
+----------
+  D42 (first Monaco attempt): 884 samples, 0 laps, col[5/6/7]=0.22/0.18/0.18 (higher)
+  D47 (second Monaco attempt): 24,364 samples, 0 laps, col[5/6/7]=0.17/0.16/0.14
+  Note: D47's lower curvature weights vs D42 may reflect the BC init driving at
+  lower speed (6 vs 17 m/s) → curvatures are less critical at slow speeds.

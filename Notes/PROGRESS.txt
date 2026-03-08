@@ -1441,3 +1441,72 @@ For true conditional SC behavior: add green-flag speed bonus (+reward when v>25 
 sc_active=False) to make static slow strategy suboptimal.
 
 Log_std maintained: throttle 0.198→0.351 (+77%), pit std 0.60→1.29 (+115%) ✓
+
+==============================================================================
+D41–D46: Competitive Positional Strategy (2026-03-06 – 2026-03-07)
+==============================================================================
+
+GOAL: Force the agent to use track_gap signal (obs[11]) for race strategy.
+D39 had col[11] weight = 0 — raw speed advantage (26.9 > 22 m/s) was sufficient.
+
+D41 (opp=27 m/s): col[11]=0.016, reward=69. Equal-speed too hard; 0 laps.
+D42 (Monaco circuit): curvature weights 0.17–0.22, 0 laps. FastF1 decimeter bug.
+  Expert driver crashed avg 17 steps — col[12] factor too high.
+D43 (opp=25 m/s): col[11]=0.022, reward=275. Follow equilibrium discovered.
+  Agent matched opponent speed (24.36 m/s) and stayed ~behind, not overtaking.
+D44 (pos_bonus 0.5→2.0): col[11]=0.055, reward=1834. Follow equilibrium broken.
+  Being ahead +4000/ep vs +1000/ep gave gradient to take and hold position.
+D45 (8 laps, fine-tune): col[11]=0.067, reward=3727. More steps, more laps.
+D46 (fine-tune, ★BEST): col[11]=0.070, reward=7943. New project best!
+  17 laps, 27.28 m/s, 100% completion. Ego ahead 56% of steps.
+  track_gap weight: 0.000 (D39) → 0.070 (D46) — positional awareness proven.
+  32% higher reward than D39 baseline multi-agent policy.
+
+Key lesson (Shortcut Closure): PPO finds the simplest winning strategy.
+  Step 1 — raise opponent speed so ego can't simply outrun it.
+  Step 2 — raise position_bonus so staying ahead is worth the effort.
+
+==============================================================================
+D42: Real Track Geometry — Monaco Circuit (2026-03-07)
+==============================================================================
+
+GOAL: Replace synthetic oval with real F1 telemetry (FastF1, Monaco 2023 Q).
+
+CRITICAL BUG: FastF1 position data is in DECIMETERS, not meters.
+  Monaco raw coords: X ≈ −7000 to +15000. After /10: −700 to +1500 m. ✓
+
+Expert driver failure: avg 17.7 steps, 0 laps, 884 samples.
+  Root cause: target_speed = 17 - 12×|err| < 0 at large heading errors → stall.
+  Lookahead=8 wpts = 100m → lateral correction atan(1/100)=0.010 rad (too small).
+
+Curvature weights: col[5/6/7] = 0.22/0.18/0.18 (vs ~0 on oval).
+  The curvature observations are USED on a real track — week-3 design validated!
+  Even in a failed (0-lap) policy, the signal is already being weighted.
+
+==============================================================================
+D47: Monaco Expert Fix v2 (2026-03-08)
+==============================================================================
+
+Fix: lookahead 8→1, max_speed 17→6, corner_factor 12→3.
+  Lookahead=1 gives 5× larger correction per lateral offset.
+  Data collection: 24,364 samples (D42: 884), 3 full Monaco laps in 100 eps.
+  BC training: loss 0.012→0.003, successful.
+
+PPO Curriculum: STILL stuck in Stage 0, 0 laps after 3M steps.
+  ep_len=514 → ~300m per episode (Monaco lap = 3750m). Never reaches lap completion.
+  Stage 0 requires grad_lap_rate=0.5 (50% episodes complete ≥1 lap) — unachievable.
+  col[5/6/7] = 0.17/0.16/0.14 — curvature signal still non-zero.
+
+Conclusion: BC+data collection fixed. Curriculum is the remaining blocker.
+For D49: skip curriculum, use straight PPO from BC at fixed max_accel=8 m/s².
+
+==============================================================================
+D48: Pit Stops + Multi-Agent Racing Combined (2026-03-08, in progress)
+==============================================================================
+
+GOAL: First experiment to require BOTH pit timing AND positional strategy.
+  env/f1_multi_pit_env.py: F1MultiAgentPitEnv — 14D obs, 3D action.
+  obs[11]=tyre_life (PitAwarePolicy-compatible), obs[12]=track_gap, obs[13]=opp_speed.
+  Warm-start from D37 (12D→14D extend_obs_dim), 5M steps.
+
+Initial ep_rew = 5740 (D37 pit skills preserved at start). Training in progress.
