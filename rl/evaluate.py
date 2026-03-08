@@ -1026,6 +1026,18 @@ def evaluate_all(n_episodes: int = 20, fixed_start: bool = False) -> List[Policy
             "env_key":       "multi_d44",
         },
         {
+            "name":  "PPO Multi-Agent D46 (d46)",
+            "color": "#1A237E",
+            # D46: Continue D45 (3M more). Lap progression: D44=3, D45=8 → D46=13+?
+            "fn":            lambda: make_ppo_policy(
+                str(project_root / "rl" / "ppo_multi_agent_d46.zip"), device,
+                obs_dim=13,
+            ),
+            "optional":      True,
+            "optional_file": "ppo_multi_agent_d46.zip",
+            "env_key":       "multi_d44",
+        },
+        {
             "name":  "PPO Multi-Agent D45 (d45)",
             "color": "#4A148C",
             # D45: Fine-tune D44 (pos_bonus=2.0) for 3M more steps.

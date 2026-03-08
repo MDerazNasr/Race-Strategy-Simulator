@@ -1,0 +1,66 @@
+D45 — Fine-tune D44 (pos_bonus=2.0, 3M more steps)
+=====================================================
+Date: 2026-03-07
+
+OBJECTIVE
+---------
+D44 broke the follow equilibrium (speed=26.91, 3 laps) but crashed after 3 laps.
+The reward signal is correct — more training should stabilize overtaking and
+push crash point further into the episode.
+
+TRAINING LOG
+------------
+Device: CPU
+Total steps: 3,000,000
+Time: ~13,831 seconds (~3.8 hours) [NOTE: system throttled, fps=216 vs D44's 1900]
+Init: D44 (col[11]=0.055003, std=[0.794, 0.111])
+LR: cosine 3e-5 → 1e-6 (lower — fine-tuning converged policy)
+ent_coef: 0.005 (lower — preserve std)
+Env: F1MultiAgentEnv(opp_max_speed=25.0, position_bonus=2.0) [unchanged]
+
+Final: ep_rew_mean = 3910, ep_len_mean = 1060, clip_fraction ≈ 0 (converged)
+
+POST-TRAINING WEIGHT DIAGNOSTICS
+----------------------------------
+policy_net[0] abs_mean = 0.062755  [D44: +2.8%]
+col[11] (track_gap) abs_mean = 0.066624  [D44=0.055003] ← +21% ✓
+col[12] (opp_speed) abs_mean = 0.014608
+log_std = [-0.2876, -2.3638]
+std     = [0.7501, 0.0941]
+
+EVALUATION RESULTS (fixed start, N=10, deterministic)
+------------------------------------------------------
+Reward: 3727.2      ← +103% vs D44 (1834.4)
+Laps: 8.00          ← +167% vs D44 (3 laps)
+Speed: 27.18 m/s    ← NEW PROJECT FASTEST (exceeds D39's 26.91!)
+Lateral error: 1.062 m  ← improved from D44's 1.285
+Completion: 0%      ← still crashes before max_steps
+
+LAP PROGRESSION ACROSS D41-D45:
+  D41: 0 laps  (can't race at opp=27)
+  D43: 0 laps  (follow equilibrium)
+  D44: 3 laps  (follow broken, but unstable)
+  D45: 8 laps  (continued improvement)
+  → Each 3M step run adds ~5 laps. D46 (3M more) should reach 13+ laps.
+
+ANALYSIS
+--------
+- Speed: 27.18 m/s is the fastest ever recorded in this project, even faster
+  than D39's 26.91. The position_bonus=2.0 is pushing the ego to go faster than
+  ever to maximize time ahead of the opponent.
+- The crash likely happens when the ego (27.18 m/s) laps the opponent (25 m/s).
+  Lapping time: 314m / (27.18-25.0) ≈ 144s = 1440 steps.
+  With 8 laps ≈ 924 steps before crash, the crash happens before the first
+  lapping event — likely at a specific corner/interaction with the opponent.
+- Continued training: ep_len 1060 suggests the crash happens around step 1060
+  in training episodes (stochastic). In deterministic eval, 8 laps ≈ 920 steps.
+  More training should push the crash point past step 2000.
+
+RECOMMENDATION: D46 — 3M more steps, same config.
+  Training ep_len barely changed (1040→1060), but eval laps 3→8 shows the
+  policy is refining the critical overtake/proximity interaction. One more
+  3M step run is likely to reach 13-17 laps and possibly 100% completion.
+
+SAVED FILES
+-----------
+rl/ppo_multi_agent_d45.zip — trained model
