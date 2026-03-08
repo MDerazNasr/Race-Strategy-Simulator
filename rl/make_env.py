@@ -195,6 +195,68 @@ def make_env_sc():
     return env
 
 
+def make_env_multi_pit_d48b():
+    """
+    Creates a pit+multi-agent environment for SB3 (D48b).
+
+    WHAT'S DIFFERENT vs make_env_multi_pit():
+      - position_bonus lowered from 2.0 → 1.0 per step when ego is ahead.
+      - D48 (position_bonus=2.0) achieved 76.9% dominance but crashed every episode
+        (0% completion). The aggressive bonus over-incentivised risk-taking at the
+        expense of track-limit awareness.
+      - position_bonus=1.0: being ahead for a full 2000-step episode = +2000 reward.
+        Still meaningfully above zero (D37 had no position bonus at all), but balanced
+        against the driving quality terms so the agent preserves lap completion.
+
+    STRATEGIC GOAL:
+      Restore completion rate (D37=100%) while keeping the positional awareness
+      that D48 proved can co-exist with pit timing (col[12]=0.023 > 0).
+      Ideally: ≥1 pit, ≥10 laps, completion >50%, col[12]>0.
+
+    TRAINING NOTE:
+      Warm-start from D48 (ppo_multi_pit_d48.zip, 14D, 3D action, PitAwarePolicy).
+      No obs extension needed — same 14D space.
+      Recreate rollout buffer (clean state after load).
+      Reset Adam optimizer (fresh momentum).
+      3M steps (shorter — D48 already has combined features, just needs stability fix).
+
+    Used in: rl/train_ppo_multi_pit_d48b.py (d48b)
+    """
+    from env.f1_multi_pit_env import F1MultiAgentPitEnv
+    env = F1MultiAgentPitEnv(position_bonus=1.0)
+    env = Monitor(env)
+    return env
+
+
+def make_env_monaco_d49(max_steps=6000, cache_dir='fastf1_cache', max_accel=8.0):
+    """
+    Creates a Monaco environment for no-curriculum PPO (D49).
+
+    WHAT'S DIFFERENT vs make_env_monaco():
+      - No CurriculumCallback — car.max_accel is fixed at 8.0 m/s² throughout.
+      - D47 showed the STAGES curriculum is too aggressive for Monaco: Stage 0
+        requires 50% lap completion, but Monaco (~3750m lap) is 12× longer than
+        the oval so this threshold is never reached.
+      - Fixed max_accel=8.0 m/s² gives the agent a stable speed ceiling (~20 m/s
+        over a 10-second acceleration from rest) — moderate enough for Monaco's
+        hairpins, high enough to be useful.
+      - Same 11D obs, 2D action as make_env_monaco().
+
+    STRATEGIC GOAL:
+      Complete at least 1 Monaco lap, advancing beyond D42/D47's 0-lap result.
+      Curvature weights should be non-zero (confirmed in D42/D47 even in failure).
+
+    Used in: rl/train_ppo_monaco_d49.py (d49)
+    """
+    from env.track import load_fastf1_track
+    from env.f1_env import F1Env
+    track = load_fastf1_track(2023, 'Monaco', 'Q', n_points=300, cache_dir=cache_dir)
+    env = F1Env(multi_lap=True, track=track, max_steps=max_steps)
+    env.car.max_accel = max_accel
+    env = Monitor(env)
+    return env
+
+
 def make_env_multi_agent():
     """
     Creates a multi-agent environment instance for SB3 (D39).
