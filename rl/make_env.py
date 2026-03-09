@@ -257,6 +257,25 @@ def make_env_multi_pit_d50():
     return env
 
 
+def make_env_multi_pit_d51():
+    """
+    Creates a pit+multi-agent environment for D51.
+
+    WHAT'S DIFFERENT vs make_env_multi_pit_d50():
+      - opp_max_speed lowered from 28 → 27 m/s.
+      - D50 (opp=28) triggered follow equilibrium: ego ahead only 5.7% vs D48b's 64.2%.
+        Ego at 23.38 m/s cannot match a 28 m/s opponent → position_bonus rarely fires.
+      - 27 m/s is a smaller step: D46 showed the ego CAN reach 27.28 m/s under pressure.
+        At opp=27, ego near 27 m/s → position_bonus fires ~50%+ of time.
+
+    Used in: rl/train_ppo_multi_pit_d51.py
+    """
+    from env.f1_multi_pit_env import F1MultiAgentPitEnv
+    env = F1MultiAgentPitEnv(opp_max_speed=27.0, position_bonus=1.0)
+    env = Monitor(env)
+    return env
+
+
 def make_env_monaco_d49(max_steps=6000, cache_dir='fastf1_cache', max_accel=8.0):
     """
     Creates a Monaco environment for no-curriculum PPO (D49).
