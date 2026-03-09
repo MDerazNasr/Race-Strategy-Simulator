@@ -537,7 +537,24 @@ Plain PPO from BC init, `max_accel=8` fixed, `max_steps=8000`, 5M steps.
 - Agent plateaus at ~500 steps (~375m), stuck at a consistent difficult section
 - Monaco needs sector rewards or longer training to reach reliable completion
 
+**D50 — Faster Opponent (opp_max_speed 25 → 28 m/s)** (complete, regression)
+Warm-start D48b, 3M steps. `opp_max_speed` raised to 28 m/s to force ego speed increase.
+
+| Metric | D50 | D48b |
+|--------|-----|------|
+| Reward | 4485 | **6122** |
+| Speed | 23.38 m/s | 23.53 m/s |
+| Ego ahead | 5.7% | **64.2%** |
+| Pits | 4 | 4 |
+| Completion | 100% | 100% |
+
+**Key finding**: follow equilibrium returned. Ego (23.38 m/s) can't match opp (28 m/s)
+→ behind 94.3% of time → `position_bonus` barely fires → reward drops 27%.
+Driving quality preserved (14 laps, 4 pits, 100%) but positional dominance lost.
+`opp=28` is too large a jump. **Next**: D51 with `opp=27` from D48b (not D50,
+whose steer std collapsed to 0.16).
+
 ---
 
-*Built over 7 weeks, 49+ experiments, ~70M PPO training steps.*
+*Built over 7 weeks, 50+ experiments, ~73M PPO training steps.*
 *Core stack: Python 3.14, PyTorch, Stable-Baselines3, Gymnasium, FastF1, Matplotlib.*

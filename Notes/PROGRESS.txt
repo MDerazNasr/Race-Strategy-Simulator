@@ -1578,3 +1578,23 @@ Key findings:
   3. Curriculum was not the only blocker: still 80% crash rate.
      Agent plateaus at ~500 steps (~375m), stuck at a consistent difficult section.
   4. Monaco needs sector rewards or much longer training to reach reliable completion.
+
+==============================================================================
+D50: Faster Opponent (opp_max_speed 25 → 28 m/s) (2026-03-08)
+==============================================================================
+
+Fix: opp_max_speed 25→28. Warm-start D48b, 3M steps, 825 seconds.
+
+Results fixed start (N=10, deterministic):
+  reward=4485 ± 0, laps=14, speed=23.38 m/s, pits=4, completion=100%, ego ahead=5.7%
+
+Post-training:
+  col[11] (tyre_life)=0.156 (+24.6%), col[12] (track_gap)=0.018 (+49% ✓)
+  steer std=0.16 (COLLAPSED), pit std=2.98 (noisy)
+
+Key findings:
+  1. FOLLOW EQUILIBRIUM: ego ahead only 5.7% (was 64.2% in D48b). Opp=28 too fast.
+  2. Reward REGRESSION: 4485 < D48b's 6122 (-27%). Lost position_bonus ≈ 1170.
+  3. Driving preserved: 14 laps, 4 pits, 100% completion identical to D48b.
+  4. Speed unchanged at 23.38 m/s — faster opponent did NOT raise ego speed.
+  5. Next: D51 opp=27 (smaller step, warm-start from D48b — D50's steer collapsed).

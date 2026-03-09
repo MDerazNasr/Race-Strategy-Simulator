@@ -1,0 +1,97 @@
+D50 — Faster Opponent (opp_max_speed 25 → 28 m/s)
+====================================================
+Date: 2026-03-08
+
+OBJECTIVE
+---------
+D48b plateaued at ego speed 23.53 m/s vs opp=25 m/s. The ego was ahead 64.2% of the
+time and pitted every ~460 steps, but never needed to go faster than the opponent.
+
+Hypothesis: raise opp_max_speed 25 → 28 m/s to force competitive pressure.
+Expected: ego targets ~30 m/s (opp+2 pattern from D44→D46), reward > 6122.
+
+CHANGE
+------
+opp_max_speed: 25 → 28 m/s
+position_bonus: 1.0 (unchanged)
+Warm-start: D48b (ppo_multi_pit_d48b.zip, 14D, 3D, PitAwarePolicy)
+Steps: 3M
+
+TRAINING
+--------
+Duration: 825 seconds (~14 minutes)
+Final ep_rew_mean: ~2710 (vs D48b's ~3500)
+Final ep_len_mean: ~1160 (vs D48b's 2000 — crashing more in training)
+
+Post-training:
+  policy_net[0] abs_mean = 0.072076  [D48b=0.067844]
+  col[11] (tyre_life)    = 0.156299  [D48b=0.125382]  +24.6% ✓
+  col[12] (track_gap)    = 0.018344  [D48b=0.012292]  +49% ✓
+  col[13] (opp_speed)    = 0.012252  (new signal learned)
+  action_net[2,128]      = -30.2837  [D48b=-30.1849]  (pit unchanged)
+  action_net.bias[2]     = +17.7731  [D48b=+17.8259]  (pit threshold ~0.587)
+  log_std = [-0.1120, -1.8418, +1.0936]
+  std     = [0.8940, 0.1585, 2.9849]
+
+WARNING: steer std = 0.1585 (nearly collapsed, same as D37 post-collapse).
+WARNING: value_loss = 319–650 (high, value fn struggling).
+WARNING: pit std = 2.9849 (highly noisy — pitting randomly in training).
+
+EVALUATION RESULTS (fixed start, N=10, deterministic)
+------------------------------------------------------
+  Reward:     4485 ± 0  (REGRESSION vs D48b=6122, -27%)
+  Laps:       14.0
+  Speed:      23.38 m/s  (SLOWER than D48b=23.53 — no speed increase!)
+  Pits:       4.0
+  Completion: 100% ✓
+  Ego ahead:  5.7%  (was D48b=64.2% — MASSIVE regression)
+  Variance:   0.0  (fully deterministic — policy collapsed to one trajectory)
+
+ROOT CAUSE ANALYSIS
+-------------------
+D50 = "follow equilibrium" at opp=28.
+
+Ego speed 23.38 m/s vs opponent 28 m/s → ego is BEHIND almost always (94.3% of steps).
+Position_bonus=1.0 fires only when ego is ahead. At 5.7% of steps:
+  D50 position contribution = 5.7% × 2000 steps × 1.0 = ~114 reward
+  D48b position contribution = 64.2% × 2000 steps × 1.0 = ~1284 reward
+
+The 1170-reward shortfall (6122 - 4485 = 1637) is mostly explained by this gap.
+
+Unlike D43's follow equilibrium (0% completion), D50 still completes because the
+ego was already a stable driver from D48b. It just gave up on fighting for position.
+
+Why didn't competitive pressure raise speed?
+  - D44→D46 arc: multi-agent WITHOUT pits. Ego speed = throttle+braking, no other costs.
+  - D50: ego WITH pits. Pitting every 460 steps creates a 100-step cooldown window.
+    During those 100 steps, fresh tyres give a temporary speed burst — but at opp=28,
+    the burst (~26 m/s) still can't reach the opponent (~28 m/s continuous).
+  - The position_bonus isn't strong enough to overcome the speed deficit.
+  - Result: agent found a stable local optimum (complete all laps + 4 pits, never fight).
+
+PATTERN: Same as D43 (opp=25, pos_bonus=0.5 → follow) and D48b's sweet spot.
+- Too high opp speed → follow equilibrium → need more position_bonus to break it
+- D43 fix was: raise pos_bonus 0.5→2.0 (D44). But D44 crashed. D48b=1.0 was sweet spot.
+- D50 fix: try opp=27 (smaller step) OR pos_bonus=1.5 at opp=28.
+
+WHAT'S NEXT (D51)
+-----------------
+Two options:
+
+A) D51a: opp=27, pos_bonus=1.0 (from D48b)
+   - Reduce the opp speed jump: 25→27 instead of 25→28
+   - D46 showed ego at 27.28 vs opp=25 → ego CAN reach 27+ m/s
+   - If ego can match opp at 27 m/s, position_bonus fires more often
+   - Risk: still a follow equilibrium if ego tops out at 24-25 m/s
+   - Expected: speed ≈ 27 m/s, ego ahead >50%, reward > 6122
+
+B) D51b: opp=28, pos_bonus=1.5 (from D48b, not D50)
+   - Keep the faster opponent but raise the incentive to fight
+   - D43→D44 showed pos_bonus is the lever to break follow equilibria
+   - Risk: raising pos_bonus may destabilize like D48's 2.0
+   - Expected: 1.5 between D48b=1.0 (stable) and D48=2.0 (crashed)
+
+RECOMMENDED: D51a (opp=27, pos_bonus=1.0)
+  - Smaller, safer step with cleaner causal interpretation
+  - D50 proved 28 is too much; 27 is the natural next point to probe
+  - Warm-start from D48b (not D50 — D50's steer std collapsed to 0.16)
