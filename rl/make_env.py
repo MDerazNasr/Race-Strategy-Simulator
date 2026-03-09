@@ -228,6 +228,35 @@ def make_env_multi_pit_d48b():
     return env
 
 
+def make_env_multi_pit_d50():
+    """
+    Creates a pit+multi-agent environment for D50.
+
+    WHAT'S DIFFERENT vs make_env_multi_pit_d48b():
+      - opp_max_speed raised from 25 → 28 m/s.
+      - D48b ego speed plateaued at 23.53 m/s vs opp at 25 m/s.
+        D46 showed ego consistently runs ~2 m/s above opp when pressured (27.28 vs 25).
+        Raising opp to 28 forces the ego to push higher speed to maintain position.
+      - With pits: fresh-tyre bursts should enable 28–30 m/s; worn-tyre economy ~24 m/s.
+        The natural variation creates incentive to pit sooner (undercut when fresh = fast).
+
+    STRATEGIC GOAL:
+      Push ego speed from D48b's 23.53 m/s toward 28+ m/s through competitive pressure,
+      while preserving the 4-pit strategy and 100% completion rate.
+
+    TRAINING NOTE:
+      Warm-start from D48b (ppo_multi_pit_d48b.zip, 14D, 3D, PitAwarePolicy).
+      No obs extension needed — same 14D space.
+      3M steps.
+
+    Used in: rl/train_ppo_multi_pit_d50.py
+    """
+    from env.f1_multi_pit_env import F1MultiAgentPitEnv
+    env = F1MultiAgentPitEnv(opp_max_speed=28.0, position_bonus=1.0)
+    env = Monitor(env)
+    return env
+
+
 def make_env_monaco_d49(max_steps=6000, cache_dir='fastf1_cache', max_accel=8.0):
     """
     Creates a Monaco environment for no-curriculum PPO (D49).
