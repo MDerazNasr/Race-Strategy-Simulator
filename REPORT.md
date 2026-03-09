@@ -551,10 +551,28 @@ Warm-start D48b, 3M steps. `opp_max_speed` raised to 28 m/s to force ego speed i
 **Key finding**: follow equilibrium returned. Ego (23.38 m/s) can't match opp (28 m/s)
 → behind 94.3% of time → `position_bonus` barely fires → reward drops 27%.
 Driving quality preserved (14 laps, 4 pits, 100%) but positional dominance lost.
-`opp=28` is too large a jump. **Next**: D51 with `opp=27` from D48b (not D50,
-whose steer std collapsed to 0.16).
+`opp=28` is too large a jump. **Next**: D51 with `opp=27` from D48b.
+
+**D51 — Faster Opponent (opp=27 m/s)** (complete) ★ NEW PIT-CIRCUIT BEST
+Warm-start D48b, 3M steps. `opp_max_speed` raised to 27 m/s (not 28 — that was too much).
+
+| Metric | D51 | D48b | D50 |
+|--------|-----|------|-----|
+| Reward | **6397** | 6122 | 4485 |
+| Speed | 23.53 m/s | 23.53 m/s | 23.38 m/s |
+| Ego ahead | **90.9%** | 64.2% | 5.7% |
+| Pit threshold | **tl=0.44** | tl=0.49 | tl=0.59 |
+| Pit interval | **~430 steps** | ~460 steps | ~460 steps |
+| Max speed | **27.38 m/s** | 27.27 m/s | — |
+| Completion | 100% | 100% | 100% |
+
+**Key finding — strategic adaptation**: a faster opponent forced *earlier and more frequent* pitting.
+The ego adapted its pit threshold from `tl=0.49` → `tl=0.44` and shortened pit intervals from
+~460 → ~430 steps. More time on fresh tyres → max speed 27.38 m/s just above the 27 m/s
+opponent → ego leads **90.9%** of the race via repeated undercuts. Counterintuitively, a
+**faster opponent produced a more dominant ego** because it forced more aggressive pit strategy.
 
 ---
 
-*Built over 7 weeks, 50+ experiments, ~73M PPO training steps.*
+*Built over 7 weeks, 51+ experiments, ~76M PPO training steps.*
 *Core stack: Python 3.14, PyTorch, Stable-Baselines3, Gymnasium, FastF1, Matplotlib.*

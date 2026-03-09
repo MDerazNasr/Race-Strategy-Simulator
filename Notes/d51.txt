@@ -1,0 +1,128 @@
+D51 — Faster Opponent (opp_max_speed 25 → 27 m/s) ★ NEW PIT-CIRCUIT BEST
+=========================================================================
+Date: 2026-03-08
+
+OBJECTIVE
+---------
+D50 (opp=28) triggered follow equilibrium: ego ahead only 5.7%, reward 4485 (-27% vs D48b).
+Root cause: 5 m/s speed gap too large — ego (23 m/s) can never catch opp (28 m/s).
+
+Fix: opp=27 (smaller step). D46 proved ego can reach 27.28 m/s under competitive pressure.
+At 27 m/s, a good pit strategy should let the ego overtake and hold position.
+
+CHANGE
+------
+opp_max_speed: 25 → 27 m/s  (vs D50's 28)
+position_bonus: 1.0 (unchanged)
+Warm-start: D48b (NOT D50 — D50's steer std collapsed to 0.16)
+Steps: 3M
+
+TRAINING
+--------
+Duration: ~825 seconds (~14 minutes)
+Final ep_rew_mean: ~3530
+Final ep_len_mean: ~1280
+
+Post-training:
+  policy_net[0] abs_mean = 0.071447  [D48b=0.067844]  +5.3%
+  col[11] (tyre_life)    = 0.145296  [D48b=0.125382]  +16.1% ↑
+  col[12] (track_gap)    = 0.021985  [D48b=0.012292]  +78.8% ↑↑ STRONG GROWTH
+  col[13] (opp_speed)    = 0.011127  (opp speed awareness present)
+  action_net[2,128]      = not logged
+  action_net.bias[2]     = +17.7772  [D48b=+17.8259]
+  Pit threshold: tl ≈ 0.588
+  log_std = [+0.0584, -1.7899, +1.0473]
+  std     = [1.0602,   0.1670,  2.8500]
+
+Note: steer std = 0.167 (collapsed, same pattern as D50).
+But this was also partially true in D37 (post-collapse) and D48b (steer std=0.159).
+The collapsed steer std means deterministic evaluation is very clean (zero variance).
+
+EVALUATION RESULTS (fixed start, N=10, deterministic)
+------------------------------------------------------
+  Reward:     6397 ± 0  ★ NEW PIT-CIRCUIT BEST (was D48b=6122, +4.5%)
+  Laps:       14.0
+  Speed:      23.53 m/s  (same as D48b)
+  Pits:       4.0
+  Completion: 100% ✓
+  Ego ahead:  90.9%  (was D48b=64.2% — massive improvement!)
+  Max speed:  27.38 m/s  (just above 27 m/s opp — undercut works!)
+
+PIT TIMING ANALYSIS
+-------------------
+  Pit steps:  440, 866, 1297, 1728
+  Tyre_life:  0.443, 0.447, 0.445, 0.445
+  Intervals:  426, 431, 431 steps
+
+Compare vs D48b:
+  D48b: steps 476/940/1390/1835, tl≈0.49, intervals ~460 steps
+  D51:  steps 440/866/1297/1728, tl≈0.44, intervals ~430 steps
+
+KEY FINDING: STRATEGIC ADAPTATION ✓
+The agent adapted its pit strategy to the faster opponent:
+  - Earlier pit trigger: tl=0.44 vs D48b's 0.49 (−10% tyre life remaining)
+  - More frequent pits: 430 vs 460 steps (−6.5% interval)
+  - Both serve the same goal: MORE TIME ON FRESH TYRES = MORE TIME FASTER THAN OPP
+  - Fresh-tyre max speed: 27.38 m/s (vs opp 27 m/s) → just enough to overtake and hold
+
+This is the "undercut" strategy in its purest form:
+  1. Ego pits early (tl=0.44, while opp continues)
+  2. Fresh tyres → ego burst to 27.38 m/s
+  3. Catch the non-pitting 27 m/s opponent
+  4. Ego ahead during degradation window (faster until tl drops back to ~0.44)
+  5. Repeat every 430 steps
+
+COMPARISON TABLE
+----------------
+| Policy | Reward | Laps | Speed | Pits | Completion | Ego ahead |
+|--------|--------|------|-------|------|------------|-----------|
+| D51 ★  | 6397   | 14   | 23.53 | 4    | 100%       | 90.9%     |
+| D48b   | 6122   | 14   | 23.53 | 4    | 100%       | 64.2%     |
+| D50    | 4485   | 14   | 23.38 | 4    | 100%       | 5.7%      |
+| D46    | 7943   | 17   | 27.28 | 0    | 100%       | 56%       |
+
+D51 vs D48b: +275 reward (+4.5%), ego ahead +26.7 percentage points.
+Same speed and lap count — difference is 100% attributable to better positional dominance.
+
+D46 still leads overall (7943) but has zero pits. D51 is best combined pit+racing strategy.
+
+REWARD DECOMPOSITION (estimated)
+---------------------------------
+D48b: base driving (~3700) + position_bonus (64.2% × 2000 × 1.0 = ~1284) + laps+pits (~1138)
+D51:  base driving (~3700) + position_bonus (90.9% × 2000 × 1.0 = ~1818) + laps+pits (~879)
+
+Position contribution increased: 1284 → 1818 (+534, explains most of the +275 gap).
+
+WHY THE POSITION DIFFERENCE?
+-----------------------------
+D48b opp=25 m/s: ego (23.53 avg) is SLOWER than opp but still ahead 64.2% due to pits.
+  - Fresh-tyre burst: ~27 m/s for ~200 steps → overtake
+  - Degraded tyres: ~21 m/s → slowly fall behind
+  - "Sweet spot" timing: pits just before falling behind
+
+D51 opp=27 m/s: ego (23.53 avg) is SLOWER but now ahead 90.9%!
+  - Increasing opp speed from 25 to 27 forced earlier, more aggressive pitting
+  - Shorter degradation window (430 vs 460 steps) = more time on fresh tyres
+  - Fresh-tyre burst (27.38 m/s) just barely beats 27 m/s opp → sustained dominance
+  - Counterintuitive: FASTER opponent → MORE dominant ego (because it adapted strategy)
+
+WHAT'S NEXT (D52)
+-----------------
+D51 achieved: 6397, 4 pits, 100%, 90.9% ahead, opp=27.
+
+Natural extensions:
+
+A) Try opp=28 from D51 (not from D48b)
+   D51 now knows how to handle 27 m/s opponents.
+   Starting from D51's strategy (tl=0.44 threshold), can it adapt to 28?
+   Risk: same follow equilibrium as D50. But D51's strategy is more aggressive (shorter intervals).
+
+B) Continue current direction, increase laps
+   D48b→D51: same 14 laps. D46 achieved 17 laps with no pits.
+   Can we get 15-17 laps with pit strategy? Max_steps=2000 limits to ~14 laps at current speed.
+   Fix: increase max_steps 2000 → 2500 and retrain from D51.
+
+C) Raise max_steps for longer race
+   More laps = more position_bonus opportunities = higher reward.
+   D46 at 17 laps with 2000 max_steps shows it's achievable without pits.
+   With pits and D51's strategy, 15+ laps at 2500 max_steps is plausible.

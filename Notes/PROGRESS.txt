@@ -1598,3 +1598,27 @@ Key findings:
   3. Driving preserved: 14 laps, 4 pits, 100% completion identical to D48b.
   4. Speed unchanged at 23.38 m/s — faster opponent did NOT raise ego speed.
   5. Next: D51 opp=27 (smaller step, warm-start from D48b — D50's steer collapsed).
+
+==============================================================================
+D51: Faster Opponent opp=27 m/s ★ NEW PIT-CIRCUIT BEST (2026-03-08)
+==============================================================================
+
+Fix: opp_max_speed 25→27 (D50's 28 was too much). Warm-start D48b, 3M steps.
+
+Results fixed start (N=10, deterministic):
+  reward=6397 ± 0, laps=14, speed=23.53 m/s, pits=4, completion=100%, ego ahead=90.9%
+  Max speed=27.38 m/s (just beats 27 m/s opp — undercut strategy works!)
+
+Pit timing: steps 440/866/1297/1728, tl≈0.444, intervals 426-431 steps
+  (D48b: steps 476/940/1390/1835, tl≈0.49, intervals ~460 steps — more aggressive now)
+
+Post-training:
+  col[12] (track_gap) = 0.022 (+79% from D48b's 0.012) ✓✓
+  col[11] (tyre_life) = 0.145 (+16%)
+
+Key findings:
+  1. NEW PIT-CIRCUIT BEST: 6397 > D48b's 6122 (+4.5%).
+  2. STRATEGIC ADAPTATION: faster opponent → earlier/more frequent pits (tl=0.44 vs 0.49).
+  3. Counterintuitive: FASTER opp → MORE dominant ego (90.9% vs 64.2% ahead).
+     Mechanism: higher opp pressure forces more aggressive undercut = more fresh-tyre time.
+  4. Max speed 27.38 just above 27 opp — perfectly calibrated undercut threshold.
